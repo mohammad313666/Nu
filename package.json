@@ -1,0 +1,9 @@
+{
+  "name": "null-telegram-airdrop",
+  "version": "2.0.0",
+  "private": true,
+  "description": "NullTap Mini App with SQLite persistence, league rewards, per-league leaderboards, storage levels and one-way WNull swap ledger",
+  "scripts": { "start": "node server.js" },
+  "dependencies": { "better-sqlite3": "^11.7.0" },
+  "engines": { "node": ">=20" }
+}
