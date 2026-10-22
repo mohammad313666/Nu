@@ -560,20 +560,13 @@ process.on('SIGINT', () => {
 
 process.on('SIGTERM', () => { try { saveDb(); sql.close(); } finally { process.exit(0); } });
 
-// Telegram webhook: reply to /start with the NullTap logo and Mini App button.
+// Telegram webhook: reply to /start with the NullTap logo, welcome text and Mini App button.
 const TELEGRAM_WEBHOOK_PATH = '/telegram-webhook';
 
 async function handleTelegramWebhook(req, res) {
   if (req.method !== 'POST') {
-    res.writeHead(405, { 'Content-Type': 'text/plain; charset=utf-8' });
-    res.end('Method Not Allowed');
-    return;
-  }
-
-  if (!BOT_TOKEN) {
-    console.error('TELEGRAM_BOT_TOKEN is not configured');
-    res.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8' });
-    res.end('Bot token is not configured');
+    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('OK');
     return;
   }
 
@@ -589,38 +582,62 @@ async function handleTelegramWebhook(req, res) {
     }
   } catch (error) {
     console.error('Could not read Telegram webhook request:', error);
-    if (!res.headersSent) res.writeHead(400);
+    if (!res.headersSent) res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
     if (!res.writableEnded) res.end('Bad request');
     return;
   }
 
-  // Acknowledge Telegram quickly; process the update afterwards.
+  // Acknowledge Telegram before calling the Telegram Bot API.
   res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
   res.end('OK');
 
   try {
     const update = JSON.parse(body || '{}');
     const msg = update.message;
-    if (!msg || typeof msg.text !== 'string' || !/^\/start(?:\s|$)/.test(msg.text)) return;
+    if (!msg || !msg.chat || !msg.chat.id || typeof msg.text !== 'string') return;
+    if (!/^\/start(?:@\w+)?(?:\s|$)/i.test(msg.text.trim())) return;
 
-    const telegramResponse = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
+    if (!BOT_TOKEN) {
+      console.error('TELEGRAM_BOT_TOKEN is not configured in Render Environment');
+      return;
+    }
+
+    const api = `https://api.telegram.org/bot${BOT_TOKEN}`;
+    const chatId = msg.chat.id;
+    const caption = '🟣 Welcome to NullTap!\n\n' +
+      '💎 Tap to earn NULL, complete tasks, and invite friends.\n\n' +
+      '🚀 Press Play to open the NullTap Mini App and start your journey!';
+    const replyMarkup = {
+      inline_keyboard: [[
+        { text: '▶️ Play', web_app: { url: 'https://nulltap.onrender.com/' } }
+      ]]
+    };
+
+    // Try to send the logo with the welcome text and Play button first.
+    const photoResponse = await fetch(`${api}/sendPhoto`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        chat_id: msg.chat.id,
+        chat_id: chatId,
         photo: 'https://nulltap.onrender.com/nulltap-logo.jpg',
-        caption: '🟣 Welcome to NullTap!\n\n💎 Tap to earn NULL, complete tasks, and invite friends!\n\n🚀 Start your journey with NullTap!',
-        reply_markup: {
-          inline_keyboard: [[
-            { text: '🚀 Play', web_app: { url: 'https://nulltap.onrender.com/' } }
-          ]]
-        }
+        caption,
+        reply_markup: replyMarkup
       })
     });
+    const photoResult = await photoResponse.json().catch(() => ({}));
 
-    const result = await telegramResponse.json().catch(() => ({}));
-    if (!telegramResponse.ok || !result.ok) {
-      console.error('Telegram sendPhoto failed:', result.description || `HTTP ${telegramResponse.status}`);
+    // If the logo URL is missing/invalid, still send the welcome text and Play button.
+    if (!photoResponse.ok || !photoResult.ok) {
+      console.error('Telegram sendPhoto failed:', photoResult.description || `HTTP ${photoResponse.status}`);
+      const messageResponse = await fetch(`${api}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, text: caption, reply_markup: replyMarkup })
+      });
+      const messageResult = await messageResponse.json().catch(() => ({}));
+      if (!messageResponse.ok || !messageResult.ok) {
+        console.error('Telegram sendMessage failed:', messageResult.description || `HTTP ${messageResponse.status}`);
+      }
     }
   } catch (error) {
     console.error('Telegram webhook error:', error);
