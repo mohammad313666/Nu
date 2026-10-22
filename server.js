@@ -520,16 +520,41 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
-  tryFile(0);
+  
+tryFile(0);
+});
+
+process.on('SIGTERM', () => {
+  try {
+    saveDb();
+    sql.close();
+  } finally {
+    process.exit(0);
+  }
+});
+
+process.on('SIGINT', () => {
+  try {
+    saveDb();
+    sql.close();
+  } finally {
+    process.exit(0);
+  }
+});
+
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`NullTap running on port ${PORT}`);
+});
+
 
 
 process.on('SIGTERM', () => { try { saveDb(); sql.close(); } finally { process.exit(0); } });
 process.on('SIGINT', () => { try { saveDb(); sql.close(); } finally { process.exit(0); } });
 
-  server.listen(PORT, '0.0.0.0', () => {
-  console.log(`NullTap running on port ${PORT}`);
+server.listen(PORT, '0.0.0.0', () => {
+console.log(`NullTap running on port ${PORT}`);
 });
 
-                                 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`NullTap running on port ${PORT}`);
+server.listen(PORT, '0.0.0.0', () => {
+console.log(`NullTap running on port ${PORT}`);
 });
