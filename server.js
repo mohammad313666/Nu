@@ -453,8 +453,14 @@ async function handleApi(req, res, pathname) {
   return json(res, 404, { error:'Not found' });
 }
 const MIME = { '.html':'text/html; charset=utf-8', '.css':'text/css; charset=utf-8', '.js':'text/javascript; charset=utf-8', '.svg':'image/svg+xml', '.json':'application/json; charset=utf-8', '.png':'image/png', '.jpg':'image/jpeg', '.jpeg':'image/jpeg' };
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+
+  if (url.pathname === '/telegram-webhook') {
+    return handleTelegramWebhook(req, res);
+  }
+
   if (url.pathname === '/tonconnect-manifest.json') { const host = req.headers.host || 'localhost:3000'; const proto = String(req.headers['x-forwarded-proto'] || url.protocol.replace(':','') || 'https').split(',')[0].trim(); const base = `${proto}://${host}`; return json(res, 200, { url:base, name:'NullTap', iconUrl:`${base}/icon-180.png` }); }
   if (url.pathname.startsWith('/api/')) return handleApi(req, res, url.pathname).catch(e => { console.error(e); json(res, 500, { error:'Internal server error' }); });
   
