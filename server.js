@@ -529,3 +529,7 @@ process.on('SIGINT', () => { try { saveDb(); sql.close(); } finally { process.ex
   server.listen(PORT, '0.0.0.0', () => {
   console.log(`NullTap running on port ${PORT}`);
 });
+
+                                 server.listen(PORT, '0.0.0.0', () => {
+  console.log(`NullTap running on port ${PORT}`);
+});
