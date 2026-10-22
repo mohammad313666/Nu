@@ -489,6 +489,25 @@ const server = http.createServer(async (req, res) => {
     return res.end('Forbidden');
   }
 
+  
+if (req.method === 'GET' && req.url.split('?')[0] === '/nulltap-logo.jpg') {
+  const logoPath = path.join(__dirname, 'nulltap-logo.jpg');
+
+  if (!fs.existsSync(logoPath)) {
+    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+    return res.end('Logo file not found');
+  }
+
+  res.writeHead(200, {
+    'Content-Type': 'image/jpeg',
+    'Content-Disposition': 'inline; filename="nulltap-logo.jpg"',
+    'Cache-Control': 'no-cache'
+  });
+
+  return fs.createReadStream(logoPath).pipe(res);
+}
+
+  
   const candidates = [
     path.join(PUBLIC, normalized),
     path.join(ROOT, normalized)
