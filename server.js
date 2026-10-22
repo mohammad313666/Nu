@@ -457,11 +457,71 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   if (url.pathname === '/tonconnect-manifest.json') { const host = req.headers.host || 'localhost:3000'; const proto = String(req.headers['x-forwarded-proto'] || url.protocol.replace(':','') || 'https').split(',')[0].trim(); const base = `${proto}://${host}`; return json(res, 200, { url:base, name:'NullTap', iconUrl:`${base}/icon-180.png` }); }
   if (url.pathname.startsWith('/api/')) return handleApi(req, res, url.pathname).catch(e => { console.error(e); json(res, 500, { error:'Internal server error' }); });
-  let pathname = decodeURIComponent(url.pathname); if (pathname === '/') pathname = '/index.html';
-  const file = path.normalize(path.join(PUBLIC, pathname));
-  if (!file.startsWith(PUBLIC)) { res.writeHead(403); return res.end('Forbidden'); }
-  fs.readFile(file, (err, data) => { if (err) { res.writeHead(404); return res.end('Not found'); } res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream' }); res.end(data); });
-});
-server.listen(PORT, () => console.log(`NULL Mini App running on port ${PORT}; SQLite: ${SQLITE_FILE}`));
+  
+
+  let pathname;
+  try {
+    pathname = decodeURIComponent(url.pathname);
+  } catch {
+    res.writeHead(400);
+    return res.end('Bad request');
+  }
+
+  const relativePath = pathname.replace(/^\/+/, '') || 'index.html';
+  const normalized = path.normalize(relativePath);
+
+  if (
+    path.isAbsolute(normalized) ||
+    normalized === '..' ||
+    normalized.startsWith('..' + path.sep)
+  ) {
+    res.writeHead(403);
+    return res.end('Forbidden');
+  }
+
+  const firstPart = normalized.split(path.sep)[0];
+  if (
+    ['node_modules', 'data', '.git'].includes(firstPart) ||
+    ['server.js', 'package.json', 'package-lock.json', '.nvmrc', '.env'].includes(normalized) ||
+    /\.(sqlite|db|jsonl)$/i.test(normalized)
+  ) {
+    res.writeHead(403);
+    return res.end('Forbidden');
+  }
+
+  const candidates = [
+    path.join(PUBLIC, normalized),
+    path.join(ROOT, normalized)
+  ];
+
+  function tryFile(index) {
+    if (index >= candidates.length) {
+      res.writeHead(404);
+      return res.end('Not found');
+    }
+
+    const file = candidates[index];
+
+    fs.readFile(file, (err, data) => {
+      if (err) {
+        if (err.code === 'ENOENT' || err.code === 'ENOTDIR') {
+          return tryFile(index + 1);
+        }
+        res.writeHead(500);
+        return res.end('Internal server error');
+      }
+
+      const ext = path.extname(file).toLowerCase();
+      res.writeHead(200, {
+        'Content-Type': MIME[ext] || 'application/octet-stream',
+        'Cache-Control': 'no-cache'
+      });
+      res.end(data);
+    });
+  }
+
+  tryFile(0);
+
+
 process.on('SIGTERM', () => { try { saveDb(); sql.close(); } finally { process.exit(0); } });
 process.on('SIGINT', () => { try { saveDb(); sql.close(); } finally { process.exit(0); } });
