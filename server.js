@@ -560,218 +560,72 @@ process.on('SIGINT', () => {
 
 process.on('SIGTERM', () => { try { saveDb(); sql.close(); } finally { process.exit(0); } });
 
-// Telegram /start welcome message with NullTap logo and Play button
-async function sendTelegramWelcome(chatId) {
-  if (!BOT_TOKEN) return;
-
-  const photoUrl = 'https://nulltap.onrender.com/nulltap-logo.jpg';
-  const gameUrl = 'https://nulltap.onrender.com/';
-
-  const welcomeText =
-    '🎮 Welcome to NullTap!\n\n' +
-    '💎 Tap to earn NULL tokens.\n' +
-    '🚀 Complete tasks, invite friends, and earn rewards!\n\n' +
-    'Start your NullTap journey now!';
-
-  const response = await fetch(
-    `https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        photo: photoUrl,
-        caption: welcomeText,
-        reply_markup: {
-          inline_keyboard: [
-            [
-              {
-                text: '🎮 Play',
-                web_app: { url: gameUrl }
-              }
-            ]
-          ]
-        }
-      })
-    }
-  );
-
-  const result = await response.json();
-  if (!result.ok) {
-    console.error('Telegram welcome message failed:', result.description);
-  }
-}
-
-
+// Telegram webhook: reply to /start with the NullTap logo and Mini App button.
 const TELEGRAM_WEBHOOK_PATH = '/telegram-webhook';
 
 async function handleTelegramWebhook(req, res) {
-  const pathname = new URL(req.url, 'http://localhost').pathname;
-
-  if (req.method !== 'POST' || pathname !== TELEGRAM_WEBHOOK_PATH) {
-    return false;
+  if (req.method !== 'POST') {
+    res.writeHead(405, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('Method Not Allowed');
+    return;
   }
 
   if (!BOT_TOKEN) {
-    res.writeHead(503);
+    console.error('TELEGRAM_BOT_TOKEN is not configured');
+    res.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('Bot token is not configured');
-    return true;
+    return;
   }
 
   let body = '';
-  for await (const chunk of req) body += chunk;
-
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('OK');
-
   try {
-    const update = JSON.parse(body);
-    const msg = update.message;
-
-    if (!msg?.text?.startsWith('/start')) return true;
-
-    const result = await fetch(
-      `https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: msg.chat.id,
-          photo: 'https://nulltap.onrender.com/nulltap-logo.jpg',
-          caption:
-            '🎮 Welcome to NullTap!\n\n' +
-            '💎 Tap to earn NULL tokens.\n' +
-            '🚀 Complete tasks, invite friends, and earn rewards!',
-          reply_markup: {
-            inline_keyboard: [[
-              {
-                text: '🚀 Play',
-                web_app: { url: 'https://nulltap.onrender.com/' }
-              }
-            ]]
-          }
-        })
+    for await (const chunk of req) {
+      body += chunk;
+      if (body.length > 1_000_000) {
+        res.writeHead(413, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('Payload too large');
+        return;
       }
-    );
-
-    const data = await result.json();
-    if (!data.ok) console.error('Telegram error:', data.description);
-  } catch (err) {
-    console.error('Telegram webhook error:', err);
+    }
+  } catch (error) {
+    console.error('Could not read Telegram webhook request:', error);
+    if (!res.headersSent) res.writeHead(400);
+    if (!res.writableEnded) res.end('Bad request');
+    return;
   }
 
-  return true;
-}
-
-
-{
-  if (req.method !== 'POST' ||
-      new URL(req.url, 'http://localhost').pathname !== TELEGRAM_WEBHOOK_PATH) {
-    return false;
-  }
-
-  let body = '';
-  for await (const chunk of req) body += chunk;
-
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  // Acknowledge Telegram quickly; process the update afterwards.
+  res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
   res.end('OK');
 
   try {
-    const update = JSON.parse(body);
+    const update = JSON.parse(body || '{}');
     const msg = update.message;
-    if (!msg?.text?.startsWith('/start')) return true;
+    if (!msg || typeof msg.text !== 'string' || !/^\/start(?:\s|$)/.test(msg.text)) return;
 
-    const chatId = msg.chat.id;
-    const api = `https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`;
-
-    const response = await fetch(api, {
+    const telegramResponse = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        chat_id: chatId,
+        chat_id: msg.chat.id,
         photo: 'https://nulltap.onrender.com/nulltap-logo.jpg',
-        caption:
-          '🟣 Welcome to NullTap!\n\n' +
-          'Tap, earn NULL, complete tasks, and invite friends.\n\n' +
-          '🚀 Start your journey with NullTap!',
+        caption: '🟣 Welcome to NullTap!\n\n💎 Tap to earn NULL, complete tasks, and invite friends!\n\n🚀 Start your journey with NullTap!',
         reply_markup: {
           inline_keyboard: [[
-            {
-              text: '🚀 Play',
-              web_app: { url: 'https://nulltap.onrender.com/' }
-            }
+            { text: '🚀 Play', web_app: { url: 'https://nulltap.onrender.com/' } }
           ]]
         }
       })
     });
 
-    if (!response.ok) {
-      console.error('Telegram sendPhoto failed:', await response.text());
-    }
-  } catch (err) {
-    console.error('Telegram webhook error:', err);
-  }
-
-  return true;
-}
-
-
-async function handleTelegramWebhook(req, res) {
-  const pathname = new URL(req.url, 'http://localhost').pathname;
-
-  if (req.method !== 'POST' || pathname !== '/telegram-webhook') {
-    return false;
-  }
-
-  let body = '';
-  for await (const chunk of req) body += chunk;
-
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('OK');
-
-  try {
-    const update = JSON.parse(body);
-    const msg = update.message;
-
-    if (!msg?.text?.startsWith('/start')) return true;
-    if (!BOT_TOKEN) {
-      console.error('TELEGRAM_BOT_TOKEN is not configured');
-      return true;
-    }
-
-    const result = await fetch(
-      `https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: msg.chat.id,
-          photo: 'https://nulltap.onrender.com/nulltap-logo.jpg',
-          caption:
-            '🟣 Welcome to NullTap!\n\n' +
-            'Tap to earn NULL, complete tasks, and invite friends!',
-          reply_markup: {
-            inline_keyboard: [[
-              {
-                text: '🚀 Play',
-                web_app: { url: 'https://nulltap.onrender.com/' }
-              }
-            ]]
-          }
-        })
-      }
-    );
-
-    if (!result.ok) {
-      console.error('Telegram sendPhoto error:', await result.text());
+    const result = await telegramResponse.json().catch(() => ({}));
+    if (!telegramResponse.ok || !result.ok) {
+      console.error('Telegram sendPhoto failed:', result.description || `HTTP ${telegramResponse.status}`);
     }
   } catch (error) {
-    console.error('Webhook error:', error);
+    console.error('Telegram webhook error:', error);
   }
-
-  return true;
 }
-
 
 server.listen(PORT, '0.0.0.0', () => {
 console.log(`NullTap running on port ${PORT}`);
