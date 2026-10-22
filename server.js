@@ -535,6 +535,48 @@ process.on('SIGINT', () => {
 
 process.on('SIGTERM', () => { try { saveDb(); sql.close(); } finally { process.exit(0); } });
 
+// Telegram /start welcome message with NullTap logo and Play button
+async function sendTelegramWelcome(chatId) {
+  if (!BOT_TOKEN) return;
+
+  const photoUrl = 'https://nulltap.onrender.com/nulltap-logo.jpg';
+  const gameUrl = 'https://nulltap.onrender.com/';
+
+  const welcomeText =
+    '🎮 Welcome to NullTap!\n\n' +
+    '💎 Tap to earn NULL tokens.\n' +
+    '🚀 Complete tasks, invite friends, and earn rewards!\n\n' +
+    'Start your NullTap journey now!';
+
+  const response = await fetch(
+    `https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        photo: photoUrl,
+        caption: welcomeText,
+        reply_markup: {
+          inline_keyboard: [
+            [
+              {
+                text: '🎮 Play',
+                web_app: { url: gameUrl }
+              }
+            ]
+          ]
+        }
+      })
+    }
+  );
+
+  const result = await response.json();
+  if (!result.ok) {
+    console.error('Telegram welcome message failed:', result.description);
+  }
+}
+
 server.listen(PORT, '0.0.0.0', () => {
 console.log(`NullTap running on port ${PORT}`);
 });
