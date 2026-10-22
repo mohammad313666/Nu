@@ -457,6 +457,10 @@ const MIME = { '.html':'text/html; charset=utf-8', '.css':'text/css; charset=utf
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
+  if (url.pathname === '/health') {
+    return json(res, 200, { ok: true, service: 'NullTap', telegramTokenConfigured: Boolean(BOT_TOKEN) });
+  }
+
   if (url.pathname === '/telegram-webhook') {
     return handleTelegramWebhook(req, res);
   }
@@ -560,90 +564,144 @@ process.on('SIGINT', () => {
 
 process.on('SIGTERM', () => { try { saveDb(); sql.close(); } finally { process.exit(0); } });
 
-// Telegram webhook: reply to /start with the NullTap logo, welcome text and Mini App button.
+// Telegram webhook: send the local NullTap logo + welcome caption + Mini App button.
 const TELEGRAM_WEBHOOK_PATH = '/telegram-webhook';
 
 async function handleTelegramWebhook(req, res) {
   if (req.method !== 'POST') {
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-    res.end('OK');
+    res.end('NullTap Telegram webhook is running');
     return;
   }
 
-  let body = '';
+  let raw = '';
   try {
     for await (const chunk of req) {
-      body += chunk;
-      if (body.length > 1_000_000) {
+      raw += chunk;
+      if (raw.length > 1_000_000) {
         res.writeHead(413, { 'Content-Type': 'text/plain; charset=utf-8' });
         res.end('Payload too large');
         return;
       }
     }
   } catch (error) {
-    console.error('Could not read Telegram webhook request:', error);
+    console.error('[Telegram] Failed reading webhook:', error.message);
     if (!res.headersSent) res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
     if (!res.writableEnded) res.end('Bad request');
     return;
   }
 
-  // Acknowledge Telegram before calling the Telegram Bot API.
+  let update;
+  try { update = JSON.parse(raw || '{}'); }
+  catch (error) {
+    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('OK');
+    console.error('[Telegram] Invalid update JSON:', error.message);
+    return;
+  }
+
+  // Acknowledge Telegram quickly, then process the update.
   res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
   res.end('OK');
 
   try {
-    const update = JSON.parse(body || '{}');
-    const msg = update.message;
-    if (!msg || !msg.chat || !msg.chat.id || typeof msg.text !== 'string') return;
-    if (!/^\/start(?:@\w+)?(?:\s|$)/i.test(msg.text.trim())) return;
+    const msg = update.message || update.edited_message;
+    if (!msg?.chat?.id || typeof msg.text !== 'string') return;
+    const command = msg.text.trim().split(/\s+/)[0];
+    if (!/^\/start(?:@\w+)?$/i.test(command)) return;
+    console.log(`[Telegram] /start received for chat ${msg.chat.id}`);
 
     if (!BOT_TOKEN) {
-      console.error('TELEGRAM_BOT_TOKEN is not configured in Render Environment');
+      console.error('[Telegram] TELEGRAM_BOT_TOKEN is missing in Render Environment.');
       return;
     }
 
+    const publicBase = String(process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || 'https://nulltap.onrender.com').replace(/\/+$/, '');
     const api = `https://api.telegram.org/bot${BOT_TOKEN}`;
     const chatId = msg.chat.id;
     const caption = '🟣 Welcome to NullTap!\n\n' +
-      '💎 Tap to earn NULL, complete tasks, and invite friends.\n\n' +
-      '🚀 Press Play to open the NullTap Mini App and start your journey!';
+      '💎 Tap to earn NULL coins, complete tasks, and invite friends to earn more.\n\n' +
+      '🚀 Ready to start? Tap PLAY below and join the airdrop!';
+    const appUrl = String(process.env.WEB_APP_URL || `${publicBase}/`).trim();
     const replyMarkup = {
       inline_keyboard: [[
-        { text: '▶️ Play', web_app: { url: 'https://nulltap.onrender.com/' } }
+        { text: '▶️ PLAY', web_app: { url: appUrl } }
       ]]
     };
 
-    // Try to send the logo with the welcome text and Play button first.
-    const photoResponse = await fetch(`${api}/sendPhoto`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        photo: 'https://nulltap.onrender.com/nulltap-logo.jpg',
-        caption,
-        reply_markup: replyMarkup
-      })
-    });
-    const photoResult = await photoResponse.json().catch(() => ({}));
+    let photoSent = false;
+    const logoPath = path.join(ROOT, 'nulltap-logo.jpg');
 
-    // If the logo URL is missing/invalid, still send the welcome text and Play button.
-    if (!photoResponse.ok || !photoResult.ok) {
-      console.error('Telegram sendPhoto failed:', photoResult.description || `HTTP ${photoResponse.status}`);
-      const messageResponse = await fetch(`${api}/sendMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: chatId, text: caption, reply_markup: replyMarkup })
-      });
-      const messageResult = await messageResponse.json().catch(() => ({}));
-      if (!messageResponse.ok || !messageResult.ok) {
-        console.error('Telegram sendMessage failed:', messageResult.description || `HTTP ${messageResponse.status}`);
+    // Upload the image file directly to Telegram. This avoids Telegram failing
+    // to download an image from a public URL or a missing static-file route.
+    if (fs.existsSync(logoPath)) {
+      try {
+        const form = new FormData();
+        form.append('chat_id', String(chatId));
+        form.append('caption', caption);
+        form.append('reply_markup', JSON.stringify(replyMarkup));
+        form.append('photo', new Blob([fs.readFileSync(logoPath)], { type: 'image/jpeg' }), 'nulltap-logo.jpg');
+        const response = await fetch(`${api}/sendPhoto`, { method: 'POST', body: form });
+        const result = await response.json().catch(() => ({}));
+        photoSent = response.ok && result.ok === true;
+        if (!photoSent) console.error('[Telegram] sendPhoto upload failed:', result.description || `HTTP ${response.status}`);
+      } catch (error) {
+        console.error('[Telegram] Local logo upload error:', error.message);
+      }
+    } else {
+      console.error(`[Telegram] Logo file not found: ${logoPath}`);
+    }
+
+    // Fallback to a remotely hosted photo if local upload could not be used.
+    if (!photoSent) {
+      try {
+        const response = await fetch(`${api}/sendPhoto`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: chatId, photo: `${publicBase}/nulltap-logo.jpg`, caption, reply_markup: replyMarkup })
+        });
+        const result = await response.json().catch(() => ({}));
+        photoSent = response.ok && result.ok === true;
+        if (!photoSent) console.error('[Telegram] sendPhoto URL fallback failed:', result.description || `HTTP ${response.status}`);
+      } catch (error) {
+        console.error('[Telegram] sendPhoto URL fallback error:', error.message);
       }
     }
+
+    // If Telegram cannot send the image, the welcome message and Launch button
+    // are still sent so /start never fails silently.
+    if (!photoSent) {
+      const response = await fetch(`${api}/sendMessage`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, text: caption, reply_markup: replyMarkup })
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.ok) console.error('[Telegram] sendMessage fallback failed:', result.description || `HTTP ${response.status}`);
+      else console.log(`[Telegram] Welcome text sent to chat ${chatId}`);
+    } else {
+      console.log(`[Telegram] Welcome photo sent to chat ${chatId}`);
+    }
   } catch (error) {
-    console.error('Telegram webhook error:', error);
+    console.error('[Telegram] Webhook processing error:', error.stack || error.message);
   }
 }
 
 server.listen(PORT, '0.0.0.0', () => {
-console.log(`NullTap running on port ${PORT}`);
+  console.log(`NullTap running on port ${PORT}`);
+  // Automatically register Telegram's webhook on Render so /start reaches this server.
+  // Set PUBLIC_URL if your Render service uses a different public URL.
+  const publicBase = String(process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || 'https://nulltap.onrender.com').replace(/\/+$/, '');
+  if (!BOT_TOKEN) {
+    console.error('TELEGRAM_BOT_TOKEN is missing; Telegram replies and webhook setup are disabled.');
+    return;
+  }
+  const webhookUrl = `${publicBase}${TELEGRAM_WEBHOOK_PATH}`;
+  fetch(`https://api.telegram.org/bot${BOT_TOKEN}/setWebhook`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url: webhookUrl, allowed_updates: ['message'] })
+  }).then(async response => {
+    const result = await response.json().catch(() => ({}));
+    if (response.ok && result.ok) console.log(`Telegram webhook registered: ${webhookUrl}`);
+    else console.error('Telegram setWebhook failed:', result.description || `HTTP ${response.status}`);
+  }).catch(error => console.error('Telegram webhook registration error:', error.message));
 });
