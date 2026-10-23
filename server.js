@@ -703,16 +703,41 @@ async function sendStartWelcome(msg) {
   const replyMarkup = { inline_keyboard: [[{ text: '▶️ PLAY', web_app: { url: appUrl } }]] };
 
   // Send the text welcome first so a missing logo can never block /start.
-  const r = await fetch(`${api}/sendMessage`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: chatId, text: caption, reply_markup: replyMarkup })
-  });
-  const d = await r.json().catch(() => ({}));
-  if (!r.ok || !d.ok) {
-    console.error('[Telegram] sendMessage failed:', d.description || `HTTP ${r.status}`);
+  // First try the welcome message with the PLAY button. If Telegram rejects
+  // the button/URL, retry with plain text so /start still gets a response.
+  let r;
+  let d = {};
+  try {
+    r = await fetch(`${api}/sendMessage`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text: caption, reply_markup: replyMarkup }),
+      signal: AbortSignal.timeout(15000)
+    });
+    d = await r.json().catch(() => ({}));
+  } catch (error) {
+    console.error('[Telegram] sendMessage network error:', error.message);
     return;
   }
-  console.log(`[Telegram] Welcome text sent to chat ${chatId}`);
+  if (r.ok && d.ok) {
+    console.log(`[Telegram] Welcome text + PLAY button sent to chat ${chatId}`);
+    return;
+  }
+  console.error('[Telegram] sendMessage with PLAY button failed:', d.description || `HTTP ${r.status}`);
+  try {
+    const retry = await fetch(`${api}/sendMessage`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text: caption }),
+      signal: AbortSignal.timeout(15000)
+    });
+    const retryData = await retry.json().catch(() => ({}));
+    if (!retry.ok || !retryData.ok) {
+      console.error('[Telegram] plain-text fallback failed:', retryData.description || `HTTP ${retry.status}`);
+    } else {
+      console.log(`[Telegram] Plain welcome text sent to chat ${chatId} (PLAY button omitted)`);
+    }
+  } catch (error) {
+    console.error('[Telegram] plain-text fallback network error:', error.message);
+  }
 }
 
 async function startTelegramPolling() {
@@ -763,11 +788,11 @@ async function startTelegramPolling() {
       }
       for (const update of data.result || []) {
         offset = Math.max(offset, Number(update.update_id) + 1);
-        const msg = update.message;
+        const msg = update.message || update.edited_message;
         if (!msg || typeof msg.text !== 'string') continue;
         const command = msg.text.trim().split(/\s+/)[0];
         if (/^\/start(?:@\w+)?$/i.test(command)) {
-          console.log(`[Telegram] /start received for chat ${msg.chat.id}`);
+          console.log(`[Telegram] /start received for chat ${msg.chat.id}; attempting welcome reply`);
           await sendStartWelcome(msg);
         }
       }
