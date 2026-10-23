@@ -616,8 +616,8 @@ async function handleTelegramWebhook(req, res) {
   }
 }
 
-// Telegram long-polling fallback: this does not depend on a correctly configured
-// public webhook URL. Render can still serve the Mini App normally.
+// Prefer webhook on hosted HTTPS (Render). Long polling only for local/dev —
+// free-tier sleep kills polling, so /start never arrives until the site is woken.
 let telegramPollingStarted = false;
 
 const START_WELCOME_CAPTION =
@@ -632,13 +632,55 @@ const START_WELCOME_CAPTION =
   '• Mine WNull and swap to NULL\n\n' +
   '🚀 Ready? Tap PLAY below to open the Mini App!';
 
+function publicBaseUrl() {
+  return String(process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || 'https://nulltap.onrender.com').replace(/\/+$/, '');
+}
+
+function buildMultipart(fields, file) {
+  const boundary = '----NullTapBoundary' + crypto.randomBytes(12).toString('hex');
+  const chunks = [];
+  for (const [name, value] of Object.entries(fields)) {
+    chunks.push(Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`,
+      'utf8'
+    ));
+  }
+  chunks.push(Buffer.from(
+    `--${boundary}\r\nContent-Disposition: form-data; name="${file.field}"; filename="${file.filename}"\r\nContent-Type: ${file.contentType}\r\n\r\n`,
+    'utf8'
+  ));
+  chunks.push(file.buffer);
+  chunks.push(Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8'));
+  return {
+    body: Buffer.concat(chunks),
+    contentType: `multipart/form-data; boundary=${boundary}`
+  };
+}
+
+async function telegramApi(method, payload, options = {}) {
+  const api = `https://api.telegram.org/bot${BOT_TOKEN}/${method}`;
+  const init = {
+    method: 'POST',
+    signal: AbortSignal.timeout(options.timeoutMs || 15000)
+  };
+  if (options.rawBody) {
+    init.headers = options.headers || {};
+    init.body = options.rawBody;
+  } else {
+    init.headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
+    init.body = JSON.stringify(payload || {});
+  }
+  const response = await fetch(api, init);
+  const data = await response.json().catch(() => ({}));
+  return { ok: response.ok && data.ok === true, status: response.status, data };
+}
+
 async function sendStartWelcome(msg) {
   if (!BOT_TOKEN || !msg?.chat?.id) {
     console.error('[Telegram] Cannot send welcome: token or chat ID missing.');
     return;
   }
-  const publicBase = String(process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || 'https://nulltap.onrender.com').replace(/\/+$/, '');
-  const api = `https://api.telegram.org/bot${BOT_TOKEN}`;
+  const publicBase = publicBaseUrl();
   const chatId = msg.chat.id;
   const caption = START_WELCOME_CAPTION;
   const appUrl = String(process.env.WEB_APP_URL || `${publicBase}/`).trim();
@@ -646,22 +688,25 @@ async function sendStartWelcome(msg) {
   const logoPath = path.join(ROOT, 'nulltap-logo.jpg');
   let photoSent = false;
 
-  // Prefer uploading the local logo so /start always shows the brand image.
+  // Manual multipart upload — more reliable than FormData/Blob on some hosts.
   if (fs.existsSync(logoPath)) {
     try {
-      const form = new FormData();
-      form.append('chat_id', String(chatId));
-      form.append('caption', caption);
-      form.append('reply_markup', JSON.stringify(replyMarkup));
-      form.append('photo', new Blob([fs.readFileSync(logoPath)], { type: 'image/jpeg' }), 'nulltap-logo.jpg');
-      const response = await fetch(`${api}/sendPhoto`, {
-        method: 'POST',
-        body: form,
-        signal: AbortSignal.timeout(20000)
+      const fileBuffer = fs.readFileSync(logoPath);
+      const multipart = buildMultipart(
+        {
+          chat_id: String(chatId),
+          caption,
+          reply_markup: JSON.stringify(replyMarkup)
+        },
+        { field: 'photo', filename: 'nulltap-logo.jpg', contentType: 'image/jpeg', buffer: fileBuffer }
+      );
+      const result = await telegramApi('sendPhoto', null, {
+        timeoutMs: 25000,
+        rawBody: multipart.body,
+        headers: { 'Content-Type': multipart.contentType }
       });
-      const result = await response.json().catch(() => ({}));
-      photoSent = response.ok && result.ok === true;
-      if (!photoSent) console.error('[Telegram] sendPhoto upload failed:', result.description || `HTTP ${response.status}`);
+      photoSent = result.ok;
+      if (!photoSent) console.error('[Telegram] sendPhoto upload failed:', result.data.description || `HTTP ${result.status}`);
     } catch (error) {
       console.error('[Telegram] Local logo upload error:', error.message);
     }
@@ -669,23 +714,16 @@ async function sendStartWelcome(msg) {
     console.error(`[Telegram] Logo file not found: ${logoPath}`);
   }
 
-  // Fallback: ask Telegram to fetch the logo from the public host.
   if (!photoSent) {
     try {
-      const response = await fetch(`${api}/sendPhoto`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: chatId,
-          photo: `${publicBase}/nulltap-logo.jpg`,
-          caption,
-          reply_markup: replyMarkup
-        }),
-        signal: AbortSignal.timeout(20000)
-      });
-      const result = await response.json().catch(() => ({}));
-      photoSent = response.ok && result.ok === true;
-      if (!photoSent) console.error('[Telegram] sendPhoto URL fallback failed:', result.description || `HTTP ${response.status}`);
+      const result = await telegramApi('sendPhoto', {
+        chat_id: chatId,
+        photo: `${publicBase}/nulltap-logo.jpg`,
+        caption,
+        reply_markup: replyMarkup
+      }, { timeoutMs: 20000 });
+      photoSent = result.ok;
+      if (!photoSent) console.error('[Telegram] sendPhoto URL fallback failed:', result.data.description || `HTTP ${result.status}`);
     } catch (error) {
       console.error('[Telegram] sendPhoto URL fallback error:', error.message);
     }
@@ -696,40 +734,55 @@ async function sendStartWelcome(msg) {
     return;
   }
 
-  // Last resort: text only so /start never fails silently.
   try {
-    const response = await fetch(`${api}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, text: caption, reply_markup: replyMarkup }),
-      signal: AbortSignal.timeout(15000)
+    const result = await telegramApi('sendMessage', {
+      chat_id: chatId,
+      text: caption,
+      reply_markup: replyMarkup
     });
-    const result = await response.json().catch(() => ({}));
-    if (response.ok && result.ok) {
+    if (result.ok) {
       console.log(`[Telegram] Welcome text + PLAY button sent to chat ${chatId}`);
       return;
     }
-    console.error('[Telegram] sendMessage with PLAY button failed:', result.description || `HTTP ${response.status}`);
+    console.error('[Telegram] sendMessage with PLAY button failed:', result.data.description || `HTTP ${result.status}`);
   } catch (error) {
     console.error('[Telegram] sendMessage network error:', error.message);
   }
 
   try {
-    const retry = await fetch(`${api}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, text: caption }),
-      signal: AbortSignal.timeout(15000)
-    });
-    const retryData = await retry.json().catch(() => ({}));
-    if (!retry.ok || !retryData.ok) {
-      console.error('[Telegram] plain-text fallback failed:', retryData.description || `HTTP ${retry.status}`);
-    } else {
-      console.log(`[Telegram] Plain welcome text sent to chat ${chatId} (PLAY button omitted)`);
-    }
+    const result = await telegramApi('sendMessage', { chat_id: chatId, text: caption });
+    if (result.ok) console.log(`[Telegram] Plain welcome text sent to chat ${chatId}`);
+    else console.error('[Telegram] plain-text fallback failed:', result.data.description || `HTTP ${result.status}`);
   } catch (error) {
     console.error('[Telegram] plain-text fallback network error:', error.message);
   }
+}
+
+async function startTelegramWebhook() {
+  const publicBase = publicBaseUrl();
+  const webhookUrl = `${publicBase}${TELEGRAM_WEBHOOK_PATH}`;
+  console.log('[Telegram] Checking bot token and Telegram API...');
+  const meResponse = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getMe`, {
+    signal: AbortSignal.timeout(10000)
+  });
+  const meData = await meResponse.json().catch(() => ({}));
+  if (!meResponse.ok || !meData.ok) {
+    console.error('[Telegram] getMe failed; check TELEGRAM_BOT_TOKEN:', meData.description || meResponse.status);
+    return false;
+  }
+  console.log(`[Telegram] Connected as @${meData.result.username}`);
+
+  const set = await telegramApi('setWebhook', {
+    url: webhookUrl,
+    allowed_updates: ['message'],
+    drop_pending_updates: false
+  });
+  if (!set.ok) {
+    console.error('[Telegram] setWebhook failed:', set.data.description || `HTTP ${set.status}`);
+    return false;
+  }
+  console.log(`[Telegram] Webhook set: ${webhookUrl}`);
+  return true;
 }
 
 async function startTelegramPolling() {
@@ -748,7 +801,6 @@ async function startTelegramPolling() {
       return;
     }
     console.log(`[Telegram] Connected as @${meData.result.username}`);
-    // Remove any old webhook so getUpdates can receive messages.
     const del = await fetch(`${api}/deleteWebhook`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -760,7 +812,7 @@ async function startTelegramPolling() {
       telegramPollingStarted = false;
       return;
     }
-    console.log('[Telegram] Long polling started; old webhook removed. Send /start to the bot now.');
+    console.log('[Telegram] Long polling started (local/dev). Send /start to the bot now.');
   } catch (e) {
     console.error('[Telegram] Could not initialize polling:', e.message);
     telegramPollingStarted = false;
@@ -795,6 +847,16 @@ async function startTelegramPolling() {
   }
 }
 
+async function startTelegramBot() {
+  const hosted = Boolean(process.env.RENDER_EXTERNAL_URL || process.env.PUBLIC_URL);
+  if (hosted) {
+    const ok = await startTelegramWebhook();
+    if (ok) return;
+    console.error('[Telegram] Webhook setup failed; falling back to long polling.');
+  }
+  await startTelegramPolling();
+}
+
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`NullTap running on port ${PORT}`);
   console.log(`[Telegram] Token configured: ${Boolean(BOT_TOKEN)}`);
@@ -802,5 +864,5 @@ server.listen(PORT, '0.0.0.0', () => {
     console.error('TELEGRAM_BOT_TOKEN is missing; set it in Render Environment.');
     return;
   }
-  startTelegramPolling().catch(e => console.error('[Telegram] Polling startup failed:', e.message));
+  startTelegramBot().catch(e => console.error('[Telegram] Startup failed:', e.message));
 });
