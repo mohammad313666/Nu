@@ -689,7 +689,10 @@ async function handleTelegramWebhook(req, res) {
 // public webhook URL. Render can still serve the Mini App normally.
 let telegramPollingStarted = false;
 async function sendStartWelcome(msg) {
-  if (!BOT_TOKEN || !msg?.chat?.id) return;
+  if (!BOT_TOKEN || !msg?.chat?.id) {
+    console.error('[Telegram] Cannot send welcome: token or chat ID missing.');
+    return;
+  }
   const publicBase = String(process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || 'https://nulltap.onrender.com').replace(/\/+$/, '');
   const api = `https://api.telegram.org/bot${BOT_TOKEN}`;
   const chatId = msg.chat.id;
@@ -699,33 +702,17 @@ async function sendStartWelcome(msg) {
   const appUrl = String(process.env.WEB_APP_URL || `${publicBase}/`).trim();
   const replyMarkup = { inline_keyboard: [[{ text: '▶️ PLAY', web_app: { url: appUrl } }]] };
 
-  const logoPath = path.join(ROOT, 'nulltap-logo.jpg');
-  if (fs.existsSync(logoPath)) {
-    try {
-      const form = new FormData();
-      form.append('chat_id', String(chatId));
-      form.append('caption', caption);
-      form.append('reply_markup', JSON.stringify(replyMarkup));
-      form.append('photo', new Blob([fs.readFileSync(logoPath)], { type: 'image/jpeg' }), 'nulltap-logo.jpg');
-      const r = await fetch(`${api}/sendPhoto`, { method: 'POST', body: form });
-      const d = await r.json().catch(() => ({}));
-      if (r.ok && d.ok) {
-        console.log(`[Telegram] Welcome photo sent to chat ${chatId}`);
-        return;
-      }
-      console.error('[Telegram] sendPhoto failed:', d.description || r.status);
-    } catch (e) {
-      console.error('[Telegram] sendPhoto error:', e.message);
-    }
-  }
-
+  // Send the text welcome first so a missing logo can never block /start.
   const r = await fetch(`${api}/sendMessage`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ chat_id: chatId, text: caption, reply_markup: replyMarkup })
   });
   const d = await r.json().catch(() => ({}));
-  if (!r.ok || !d.ok) console.error('[Telegram] sendMessage failed:', d.description || r.status);
-  else console.log(`[Telegram] Welcome text sent to chat ${chatId}`);
+  if (!r.ok || !d.ok) {
+    console.error('[Telegram] sendMessage failed:', d.description || `HTTP ${r.status}`);
+    return;
+  }
+  console.log(`[Telegram] Welcome text sent to chat ${chatId}`);
 }
 
 async function startTelegramPolling() {
@@ -735,6 +722,15 @@ async function startTelegramPolling() {
   let offset = 0;
 
   try {
+    console.log('[Telegram] Checking bot token and Telegram API...');
+    const meResponse = await fetch(`${api}/getMe`, { signal: AbortSignal.timeout(10000) });
+    const meData = await meResponse.json().catch(() => ({}));
+    if (!meResponse.ok || !meData.ok) {
+      console.error('[Telegram] getMe failed; check TELEGRAM_BOT_TOKEN:', meData.description || meResponse.status);
+      telegramPollingStarted = false;
+      return;
+    }
+    console.log(`[Telegram] Connected as @${meData.result.username}`);
     // Remove any old webhook so getUpdates can receive messages.
     const del = await fetch(`${api}/deleteWebhook`, {
       method: 'POST',
@@ -747,7 +743,7 @@ async function startTelegramPolling() {
       telegramPollingStarted = false;
       return;
     }
-    console.log('[Telegram] Long polling started; old webhook removed.');
+    console.log('[Telegram] Long polling started; old webhook removed. Send /start to the bot now.');
   } catch (e) {
     console.error('[Telegram] Could not initialize polling:', e.message);
     telegramPollingStarted = false;
@@ -784,6 +780,7 @@ async function startTelegramPolling() {
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`NullTap running on port ${PORT}`);
+  console.log(`[Telegram] Token configured: ${Boolean(BOT_TOKEN)}`);
   if (!BOT_TOKEN) {
     console.error('TELEGRAM_BOT_TOKEN is missing; set it in Render Environment.');
     return;
