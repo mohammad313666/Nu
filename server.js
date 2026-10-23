@@ -468,10 +468,17 @@ const server = http.createServer(async (req, res) => {
     };
     if (!BOT_TOKEN) return json(res, 200, status);
     try {
-      // Self-heal: re-register webhook if Telegram dropped it (common after sleeps/redeploys).
-      if (process.env.RENDER_EXTERNAL_URL || process.env.PUBLIC_URL) {
-        await ensureTelegramWebhook().catch(e => {
+      status.useWebhook = shouldUseWebhook();
+      status.env = {
+        hasRenderExternalUrl: Boolean(process.env.RENDER_EXTERNAL_URL),
+        hasPublicUrl: Boolean(process.env.PUBLIC_URL),
+        telegramPolling: process.env.TELEGRAM_POLLING || null
+      };
+      // Self-heal webhook on every health check when HTTPS public base is available.
+      if (shouldUseWebhook()) {
+        status.webhookEnsured = await ensureTelegramWebhook().catch(e => {
           status.webhookEnsureError = e.message;
+          return false;
         });
       }
       const infoResponse = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getWebhookInfo`, {
@@ -495,6 +502,8 @@ const server = http.createServer(async (req, res) => {
       const meData = await meResponse.json().catch(() => ({}));
       if (meData.ok && meData.result) {
         status.bot = { username: meData.result.username, id: meData.result.id, name: meData.result.first_name };
+      } else {
+        status.botError = meData.description || `HTTP ${meResponse.status}`;
       }
     } catch (error) {
       status.telegramStatusError = error.message;
@@ -624,6 +633,14 @@ const START_WELCOME_CAPTION =
 
 function publicBaseUrl() {
   return String(process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || 'https://nulltap.onrender.com').replace(/\/+$/, '');
+}
+
+// Prefer webhook whenever we have an HTTPS public URL. Do NOT require RENDER_EXTERNAL_URL —
+// some hosts omit it, and falling back to polling deletes the webhook then dies on sleep.
+function shouldUseWebhook() {
+  if (process.env.TELEGRAM_POLLING === 'true') return false;
+  if (process.env.TELEGRAM_WEBHOOK === 'false') return false;
+  return /^https:\/\//i.test(publicBaseUrl());
 }
 
 function isStartCommand(text) {
@@ -892,22 +909,31 @@ async function startTelegramPolling() {
 }
 
 async function startTelegramBot() {
-  const hosted = Boolean(process.env.RENDER_EXTERNAL_URL || process.env.PUBLIC_URL);
-  if (hosted) {
-    console.log('[Telegram] Checking bot token and Telegram API...');
-    const meResponse = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getMe`, {
-      signal: AbortSignal.timeout(10000)
-    });
-    const meData = await meResponse.json().catch(() => ({}));
-    if (!meResponse.ok || !meData.ok) {
-      console.error('[Telegram] getMe failed; check TELEGRAM_BOT_TOKEN:', meData.description || meResponse.status);
+  console.log('[Telegram] Checking bot token and Telegram API...');
+  const meResponse = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getMe`, {
+    signal: AbortSignal.timeout(10000)
+  });
+  const meData = await meResponse.json().catch(() => ({}));
+  if (!meResponse.ok || !meData.ok) {
+    console.error('[Telegram] getMe failed; check TELEGRAM_BOT_TOKEN:', meData.description || meResponse.status);
+    return;
+  }
+  console.log(`[Telegram] Connected as @${meData.result.username}`);
+
+  if (shouldUseWebhook()) {
+    const ok = await ensureTelegramWebhook();
+    if (ok) {
+      console.log('[Telegram] Using webhook mode. /start will arrive via POST /telegram-webhook');
       return;
     }
-    console.log(`[Telegram] Connected as @${meData.result.username}`);
-    const ok = await ensureTelegramWebhook();
-    if (ok) return;
-    console.error('[Telegram] Webhook setup failed; falling back to long polling.');
+    console.error('[Telegram] Webhook setup failed; NOT falling back to polling on HTTPS host (polling breaks after sleep).');
+    // Keep retrying webhook registration so a later /health or restart can recover.
+    setInterval(() => {
+      ensureTelegramWebhook().catch(e => console.error('[Telegram] webhook retry failed:', e.message));
+    }, 60_000).unref?.();
+    return;
   }
+
   await startTelegramPolling();
 }
 
