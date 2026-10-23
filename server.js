@@ -610,76 +610,7 @@ async function handleTelegramWebhook(req, res) {
     const command = msg.text.trim().split(/\s+/)[0];
     if (!/^\/start(?:@\w+)?$/i.test(command)) return;
     console.log(`[Telegram] /start received for chat ${msg.chat.id}`);
-
-    if (!BOT_TOKEN) {
-      console.error('[Telegram] TELEGRAM_BOT_TOKEN is missing in Render Environment.');
-      return;
-    }
-
-    const publicBase = String(process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || 'https://nulltap.onrender.com').replace(/\/+$/, '');
-    const api = `https://api.telegram.org/bot${BOT_TOKEN}`;
-    const chatId = msg.chat.id;
-    const caption = '🟣 Welcome to NullTap!\n\n' +
-      '💎 Tap to earn NULL coins, complete tasks, and invite friends to earn more.\n\n' +
-      '🚀 Ready to start? Tap PLAY below and join the airdrop!';
-    const appUrl = String(process.env.WEB_APP_URL || `${publicBase}/`).trim();
-    const replyMarkup = {
-      inline_keyboard: [[
-        { text: '▶️ PLAY', web_app: { url: appUrl } }
-      ]]
-    };
-
-    let photoSent = false;
-    const logoPath = path.join(ROOT, 'nulltap-logo.jpg');
-
-    // Upload the image file directly to Telegram. This avoids Telegram failing
-    // to download an image from a public URL or a missing static-file route.
-    if (fs.existsSync(logoPath)) {
-      try {
-        const form = new FormData();
-        form.append('chat_id', String(chatId));
-        form.append('caption', caption);
-        form.append('reply_markup', JSON.stringify(replyMarkup));
-        form.append('photo', new Blob([fs.readFileSync(logoPath)], { type: 'image/jpeg' }), 'nulltap-logo.jpg');
-        const response = await fetch(`${api}/sendPhoto`, { method: 'POST', body: form });
-        const result = await response.json().catch(() => ({}));
-        photoSent = response.ok && result.ok === true;
-        if (!photoSent) console.error('[Telegram] sendPhoto upload failed:', result.description || `HTTP ${response.status}`);
-      } catch (error) {
-        console.error('[Telegram] Local logo upload error:', error.message);
-      }
-    } else {
-      console.error(`[Telegram] Logo file not found: ${logoPath}`);
-    }
-
-    // Fallback to a remotely hosted photo if local upload could not be used.
-    if (!photoSent) {
-      try {
-        const response = await fetch(`${api}/sendPhoto`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ chat_id: chatId, photo: `${publicBase}/nulltap-logo.jpg`, caption, reply_markup: replyMarkup })
-        });
-        const result = await response.json().catch(() => ({}));
-        photoSent = response.ok && result.ok === true;
-        if (!photoSent) console.error('[Telegram] sendPhoto URL fallback failed:', result.description || `HTTP ${response.status}`);
-      } catch (error) {
-        console.error('[Telegram] sendPhoto URL fallback error:', error.message);
-      }
-    }
-
-    // If Telegram cannot send the image, the welcome message and Launch button
-    // are still sent so /start never fails silently.
-    if (!photoSent) {
-      const response = await fetch(`${api}/sendMessage`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: chatId, text: caption, reply_markup: replyMarkup })
-      });
-      const result = await response.json().catch(() => ({}));
-      if (!response.ok || !result.ok) console.error('[Telegram] sendMessage fallback failed:', result.description || `HTTP ${response.status}`);
-      else console.log(`[Telegram] Welcome text sent to chat ${chatId}`);
-    } else {
-      console.log(`[Telegram] Welcome photo sent to chat ${chatId}`);
-    }
+    await sendStartWelcome(msg);
   } catch (error) {
     console.error('[Telegram] Webhook processing error:', error.stack || error.message);
   }
@@ -688,6 +619,19 @@ async function handleTelegramWebhook(req, res) {
 // Telegram long-polling fallback: this does not depend on a correctly configured
 // public webhook URL. Render can still serve the Mini App normally.
 let telegramPollingStarted = false;
+
+const START_WELCOME_CAPTION =
+  '🟣 Welcome to NullTap!\n\n' +
+  '🎮 NullTap is a Telegram Mini App on the TON network.\n' +
+  'Tap to earn NULL coins, complete tasks, and invite friends.\n\n' +
+  '✨ Inside the Mini App:\n' +
+  '• Tap to earn NULL\n' +
+  '• Daily & social tasks\n' +
+  '• Leagues and leaderboards\n' +
+  '• Referrals and squads\n' +
+  '• Mine WNull and swap to NULL\n\n' +
+  '🚀 Ready? Tap PLAY below to open the Mini App!';
+
 async function sendStartWelcome(msg) {
   if (!BOT_TOKEN || !msg?.chat?.id) {
     console.error('[Telegram] Cannot send welcome: token or chat ID missing.');
@@ -696,36 +640,84 @@ async function sendStartWelcome(msg) {
   const publicBase = String(process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || 'https://nulltap.onrender.com').replace(/\/+$/, '');
   const api = `https://api.telegram.org/bot${BOT_TOKEN}`;
   const chatId = msg.chat.id;
-  const caption = '🟣 Welcome to NullTap!\n\n' +
-    '💎 Tap to earn NULL coins, complete tasks, and invite friends to earn more.\n\n' +
-    '🚀 Ready to start? Tap PLAY below and join the airdrop!';
+  const caption = START_WELCOME_CAPTION;
   const appUrl = String(process.env.WEB_APP_URL || `${publicBase}/`).trim();
   const replyMarkup = { inline_keyboard: [[{ text: '▶️ PLAY', web_app: { url: appUrl } }]] };
+  const logoPath = path.join(ROOT, 'nulltap-logo.jpg');
+  let photoSent = false;
 
-  // Send the text welcome first so a missing logo can never block /start.
-  // First try the welcome message with the PLAY button. If Telegram rejects
-  // the button/URL, retry with plain text so /start still gets a response.
-  let r;
-  let d = {};
+  // Prefer uploading the local logo so /start always shows the brand image.
+  if (fs.existsSync(logoPath)) {
+    try {
+      const form = new FormData();
+      form.append('chat_id', String(chatId));
+      form.append('caption', caption);
+      form.append('reply_markup', JSON.stringify(replyMarkup));
+      form.append('photo', new Blob([fs.readFileSync(logoPath)], { type: 'image/jpeg' }), 'nulltap-logo.jpg');
+      const response = await fetch(`${api}/sendPhoto`, {
+        method: 'POST',
+        body: form,
+        signal: AbortSignal.timeout(20000)
+      });
+      const result = await response.json().catch(() => ({}));
+      photoSent = response.ok && result.ok === true;
+      if (!photoSent) console.error('[Telegram] sendPhoto upload failed:', result.description || `HTTP ${response.status}`);
+    } catch (error) {
+      console.error('[Telegram] Local logo upload error:', error.message);
+    }
+  } else {
+    console.error(`[Telegram] Logo file not found: ${logoPath}`);
+  }
+
+  // Fallback: ask Telegram to fetch the logo from the public host.
+  if (!photoSent) {
+    try {
+      const response = await fetch(`${api}/sendPhoto`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId,
+          photo: `${publicBase}/nulltap-logo.jpg`,
+          caption,
+          reply_markup: replyMarkup
+        }),
+        signal: AbortSignal.timeout(20000)
+      });
+      const result = await response.json().catch(() => ({}));
+      photoSent = response.ok && result.ok === true;
+      if (!photoSent) console.error('[Telegram] sendPhoto URL fallback failed:', result.description || `HTTP ${response.status}`);
+    } catch (error) {
+      console.error('[Telegram] sendPhoto URL fallback error:', error.message);
+    }
+  }
+
+  if (photoSent) {
+    console.log(`[Telegram] Welcome photo + intro sent to chat ${chatId}`);
+    return;
+  }
+
+  // Last resort: text only so /start never fails silently.
   try {
-    r = await fetch(`${api}/sendMessage`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
+    const response = await fetch(`${api}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chat_id: chatId, text: caption, reply_markup: replyMarkup }),
       signal: AbortSignal.timeout(15000)
     });
-    d = await r.json().catch(() => ({}));
+    const result = await response.json().catch(() => ({}));
+    if (response.ok && result.ok) {
+      console.log(`[Telegram] Welcome text + PLAY button sent to chat ${chatId}`);
+      return;
+    }
+    console.error('[Telegram] sendMessage with PLAY button failed:', result.description || `HTTP ${response.status}`);
   } catch (error) {
     console.error('[Telegram] sendMessage network error:', error.message);
-    return;
   }
-  if (r.ok && d.ok) {
-    console.log(`[Telegram] Welcome text + PLAY button sent to chat ${chatId}`);
-    return;
-  }
-  console.error('[Telegram] sendMessage with PLAY button failed:', d.description || `HTTP ${r.status}`);
+
   try {
     const retry = await fetch(`${api}/sendMessage`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chat_id: chatId, text: caption }),
       signal: AbortSignal.timeout(15000)
     });
