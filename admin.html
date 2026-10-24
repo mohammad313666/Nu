@@ -1,26 +1,26 @@
 <!doctype html>
-<html lang="fa" dir="rtl">
-<head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-<meta name="theme-color" content="#090611"><title>NullTap Admin Dashboard</title>
+<html lang="fa" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><title>NullTap Admin</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
-:root{color-scheme:dark;--bg:#090611;--card:#171126;--line:#302246;--purple:#b68aff;--muted:#b9adc9}*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at top,#21133a 0%,var(--bg) 58%);color:#fff;font-family:system-ui,-apple-system,Segoe UI,sans-serif;min-height:100vh;padding:22px 14px}main{max-width:760px;margin:auto}.head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:22px}.brand{font-size:12px;color:var(--purple);letter-spacing:2px}.title{font-size:25px;font-weight:800;margin:5px 0}.subtitle{color:var(--muted);font-size:13px}.btn{border:1px solid var(--line);background:#211733;color:white;border-radius:12px;padding:10px 13px;font-weight:700}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.card{background:linear-gradient(145deg,#1c1430,#110d1d);border:1px solid var(--line);border-radius:18px;padding:18px;min-height:132px}.icon{width:38px;height:38px;display:grid;place-items:center;border-radius:12px;background:#302047;color:#d4b8ff;font-size:20px}.label{color:var(--muted);font-size:13px;margin-top:14px}.value{font-size:31px;font-weight:850;margin-top:2px;letter-spacing:.3px}.foot{margin-top:16px;color:var(--muted);font-size:12px;line-height:1.8}.status{margin-top:16px;border:1px solid var(--line);border-radius:14px;padding:12px;color:var(--muted);font-size:13px}.error{color:#ff9fba}@media(min-width:600px){.grid{grid-template-columns:repeat(4,minmax(0,1fr))}.card{padding:15px}.value{font-size:28px}}
-</style></head>
-<body><main>
-<div class="head"><div><div class="brand">NULLTAP • ADMIN</div><div class="title">داشبورد مدیریت</div><div class="subtitle">آمار کاربران بر اساس دیتابیس پروژه</div></div><button class="btn" id="refresh">به‌روزرسانی ↻</button></div>
+*{box-sizing:border-box}body{margin:0;background:#090611;color:#f5f0ff;font-family:system-ui,-apple-system,sans-serif;padding:22px}
+main{max-width:900px;margin:auto}.brand{color:#c6a5ff;font-weight:800;letter-spacing:2px}.sub{color:#a99dbb;margin:6px 0 22px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px}.card{background:#171124;border:1px solid #34234b;border-radius:18px;padding:20px}.label{color:#b8a9cc;font-size:14px}.value{font-size:32px;font-weight:800;margin-top:12px;color:#d7b8ff}
+button{border:0;border-radius:12px;padding:12px 18px;background:#9b5cff;color:#fff;font-weight:700;margin:18px 0;cursor:pointer}.status{color:#b8a9cc;font-size:13px} .error{color:#ff9898}
+</style></head><body><main><div class="brand">NULLTAP / ADMIN</div><h1>داشبورد مدیریت</h1><div class="sub">آمار کاربران • به‌روزرسانی خودکار هر ۶۰ ثانیه</div>
 <div class="grid">
-<section class="card"><div class="icon">♙</div><div class="label">کل کاربران</div><div class="value" id="total">—</div></section>
-<section class="card"><div class="icon">●</div><div class="label">کاربران آنلاین</div><div class="value" id="online">—</div></section>
-<section class="card"><div class="icon">＋</div><div class="label">عضویت در ۲۴ ساعت اخیر</div><div class="value" id="day">—</div></section>
-<section class="card"><div class="icon">▦</div><div class="label">عضویت در ۳۰ روز اخیر</div><div class="value" id="month">—</div></section>
-</div>
-<div class="status" id="status">در حال بررسی دسترسی مدیر…</div>
-<div class="foot">کاربر آنلاین یعنی کاربری که در ۵ دقیقه اخیر از برنامه درخواست فرستاده باشد. آمار عضویت از زمان ثبت createdAt حساب می‌شود. این صفحه فقط با احراز هویت تلگرام و شناسه مدیر مجاز قابل مشاهده است.</div>
-</main>
+<div class="card"><div class="label">کل کاربران</div><div class="value" id="total">—</div></div>
+<div class="card"><div class="label">آنلاین در ۵ دقیقه اخیر</div><div class="value" id="online">—</div></div>
+<div class="card"><div class="label">عضوهای ۲۴ ساعت اخیر</div><div class="value" id="d1">—</div></div>
+<div class="card"><div class="label">عضوهای ۳۰ روز اخیر</div><div class="value" id="d30">—</div></div>
+</div><button id="refresh">به‌روزرسانی</button><div class="status" id="status">این صفحه را از داخل تلگرام و با حساب ادمین باز کن.</div></main>
 <script>
-(()=>{const tg=window.Telegram?.WebApp; if(tg){tg.ready();tg.expand();try{tg.setHeaderColor('#090611');tg.setBackgroundColor('#090611')}catch{}}
-const $=id=>document.getElementById(id);const fmt=n=>Number(n||0).toLocaleString('en-US');
-async function load(){const status=$('status');status.classList.remove('error');status.textContent='در حال دریافت آمار…';try{if(!tg||!tg.initData){throw new Error('داشبورد را از داخل Telegram Mini App باز کن؛ ورود مستقیم از مرورگر احراز هویت ندارد.')}const r=await fetch('/api/admin/stats',{headers:{'X-Telegram-Init-Data':tg.initData},cache:'no-store'});const d=await r.json();if(!r.ok)throw new Error(d.error||'دسترسی مدیر تأیید نشد.');$('total').textContent=fmt(d.totalUsers);$('online').textContent=fmt(d.onlineUsers);$('day').textContent=fmt(d.newUsers24h);$('month').textContent=fmt(d.newUsers30d);status.textContent='آخرین به‌روزرسانی: '+new Date(d.checkedAt).toLocaleString()+' • بازه آنلاین بودن: '+d.onlineWindowMinutes+' دقیقه';}catch(e){status.classList.add('error');status.textContent=e.message;}}
-$('refresh').addEventListener('click',load);load();setInterval(load,60000);})();
+const tg=window.Telegram?.WebApp; if(tg){tg.ready();tg.expand();}
+async function load(){const el=document.getElementById('status');el.className='status';el.textContent='در حال دریافت آمار…';
+try{if(!tg?.initData)throw new Error('این داشبورد باید داخل Telegram Mini App باز شود.');
+const r=await fetch('/api/admin/stats',{headers:{'X-Telegram-Init-Data':tg.initData,'Cache-Control':'no-cache'}});
+const d=await r.json();if(!r.ok)throw new Error(d.error||'دسترسی ادمین تأیید نشد.');
+document.getElementById('total').textContent=d.totalUsers;document.getElementById('online').textContent=d.onlineUsers;document.getElementById('d1').textContent=d.newUsers24h;document.getElementById('d30').textContent=d.newUsers30d;
+el.textContent='آخرین بررسی: '+new Date(d.checkedAt).toLocaleString('fa-IR');}
+catch(e){el.className='status error';el.textContent=e.message;}}
+document.getElementById('refresh').onclick=load;load();setInterval(load,60000);
 </script></body></html>
