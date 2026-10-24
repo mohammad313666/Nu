@@ -671,7 +671,7 @@ async function handleTelegramWebhook(req, res) {
     };
 
     let photoSent = false;
-    const logoPath = path.join(ROOT, 'nulltap-logo.jpg');
+    const logoPath = path.join(PUBLIC, 'nulltap-logo.jpg');
 
     // Upload the image file directly to Telegram. This avoids Telegram failing
     // to download an image from a public URL or a missing static-file route.
@@ -734,7 +734,7 @@ async function sendStartWelcome(msg) {
     console.error('[Telegram] Cannot send welcome: token or chat ID missing.');
     return;
   }
-  const publicBase = String(process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || 'https://nulltap.onrender.com').replace(/\/+$/, '');
+  const publicBase = String(process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || 'https://null-ty30.onrender.com').replace(/\/+$/, '');
   const api = `https://api.telegram.org/bot${BOT_TOKEN}`;
   const chatId = msg.chat.id;
   const caption = '🟣 Welcome to NullTap!\n\n' +
@@ -742,18 +742,32 @@ async function sendStartWelcome(msg) {
     '🚀 Ready to start? Tap PLAY below and join the airdrop!';
   const appUrl = String(process.env.WEB_APP_URL || `${publicBase}/`).trim();
   const replyMarkup = { inline_keyboard: [[{ text: '▶️ PLAY', web_app: { url: appUrl } }]] };
-
-  // Send the text welcome first so a missing logo can never block /start.
+  const logoPath = path.join(PUBLIC, 'nulltap-logo.jpg');
+  if (fs.existsSync(logoPath)) {
+    try {
+      const form = new FormData();
+      form.append('chat_id', String(chatId));
+      form.append('caption', caption);
+      form.append('reply_markup', JSON.stringify(replyMarkup));
+      form.append('photo', new Blob([fs.readFileSync(logoPath)], { type: 'image/jpeg' }), 'nulltap-logo.jpg');
+      const r = await fetch(`${api}/sendPhoto`, { method: 'POST', body: form });
+      const d = await r.json().catch(() => ({}));
+      if (r.ok && d.ok) {
+        console.log(`[Telegram] Welcome photo sent to chat ${chatId}`);
+        return;
+      }
+      console.error('[Telegram] sendPhoto failed:', d.description || `HTTP ${r.status}`);
+    } catch (e) { console.error('[Telegram] sendPhoto error:', e.message); }
+  } else {
+    console.error(`[Telegram] Logo file not found: ${logoPath}`);
+  }
   const r = await fetch(`${api}/sendMessage`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ chat_id: chatId, text: caption, reply_markup: replyMarkup })
   });
   const d = await r.json().catch(() => ({}));
-  if (!r.ok || !d.ok) {
-    console.error('[Telegram] sendMessage failed:', d.description || `HTTP ${r.status}`);
-    return;
-  }
-  console.log(`[Telegram] Welcome text sent to chat ${chatId}`);
+  if (!r.ok || !d.ok) console.error('[Telegram] sendMessage failed:', d.description || `HTTP ${r.status}`);
+  else console.log(`[Telegram] Welcome text sent to chat ${chatId}`);
 }
 
 async function startTelegramPolling() {
