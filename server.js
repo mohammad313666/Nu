@@ -3,7 +3,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const Database = require('better-sqlite3');
+const { Pool } = require('pg');
 const { URL } = require('url');
 
 const PORT = Number(process.env.PORT || 3000);
@@ -20,28 +20,17 @@ const ROOT = __dirname;
 const PUBLIC = path.join(ROOT, 'public');
 const DATA_DIR = path.join(ROOT, 'data');
 const DB_FILE = path.join(DATA_DIR, 'db.json');
-const LEGACY_SQLITE_FILE = path.join(DATA_DIR, 'nulltap.sqlite');
-const SQLITE_FILE = process.env.DB_PATH || LEGACY_SQLITE_FILE;
-fs.mkdirSync(path.dirname(SQLITE_FILE), { recursive: true });
-// One-time migration: when a Render Persistent Disk is configured with DB_PATH,
-// preserve the old database before opening the new location. Do not overwrite an existing target.
-if (path.resolve(SQLITE_FILE) !== path.resolve(LEGACY_SQLITE_FILE) && !fs.existsSync(SQLITE_FILE) && fs.existsSync(LEGACY_SQLITE_FILE)) {
-  let legacy;
-  try {
-    legacy = new Database(LEGACY_SQLITE_FILE);
-    legacy.pragma('wal_checkpoint(TRUNCATE)');
-    legacy.close();
-    legacy = null;
-    fs.copyFileSync(LEGACY_SQLITE_FILE, SQLITE_FILE, fs.constants.COPYFILE_EXCL);
-  } catch (e) {
-    try { if (legacy) legacy.close(); } catch {}
-    console.error('Legacy SQLite migration failed; refusing to silently overwrite or reset data:', e.message);
-    throw e;
-  }
-}
-const sql = new Database(SQLITE_FILE);
-sql.pragma('journal_mode = WAL');
-sql.exec('CREATE TABLE IF NOT EXISTS app_state (id INTEGER PRIMARY KEY CHECK (id = 1), state_json TEXT NOT NULL, updated_at INTEGER NOT NULL)');
+const DATABASE_URL = process.env.DATABASE_URL || '';
+if (!DATABASE_URL) console.warn('[DB] DATABASE_URL is not set; PostgreSQL persistence is unavailable.');
+const pool = new Pool({
+  connectionString: DATABASE_URL || undefined,
+  ssl: DATABASE_URL && !/localhost|127\\.0\\.0\\.1/.test(DATABASE_URL) ? { rejectUnauthorized: false } : false,
+  max: 5,
+  connectionTimeoutMillis: 10000
+});
+let dbReady = false;
+let saveQueue = Promise.resolve();
+
 
 const TAP_UPGRADE_COST = level => level >= 2 && level <= 10 ? (level - 1) * 25 : null;
 const ENERGY_UPGRADE_COST = level => level >= 2 && level <= 10 ? (level - 1) * 25 : null;
@@ -82,12 +71,27 @@ const TASKS = [
 ];
 
 function freshDb() { return { users: {}, referrals: [], tasks: TASKS, claims: [], squads: {}, miningPool: { mined: 0, cap: WNULL_POOL_CAP }, settings: { projectName: 'NULL', referralReward: REFERRAL_REWARD } }; }
-function loadDb() {
-  const row = sql.prepare('SELECT state_json FROM app_state WHERE id=1').get();
-  if (row) { try { return JSON.parse(row.state_json); } catch {} }
-  try { return JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); } catch { const d = freshDb(); return d; }
+let db = freshDb();
+async function initPostgres() {
+  if (!DATABASE_URL) throw new Error('DATABASE_URL is required for persistent PostgreSQL storage.');
+  await pool.query(`CREATE TABLE IF NOT EXISTS nulltap_state (
+    id SMALLINT PRIMARY KEY CHECK (id = 1),
+    state_json JSONB NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`);
+  const result = await pool.query('SELECT state_json FROM nulltap_state WHERE id=1');
+  if (result.rows.length) {
+    db = typeof result.rows[0].state_json === 'string' ? JSON.parse(result.rows[0].state_json) : result.rows[0].state_json;
+  } else {
+    // Import existing local JSON backup only if PostgreSQL has no state yet.
+    try { db = JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); }
+    catch { db = freshDb(); }
+    await pool.query('INSERT INTO nulltap_state (id,state_json,updated_at) VALUES (1,$1::jsonb,NOW()) ON CONFLICT (id) DO NOTHING', [JSON.stringify(db)]);
+    const check = await pool.query('SELECT state_json FROM nulltap_state WHERE id=1');
+    if (check.rows.length) db = typeof check.rows[0].state_json === 'string' ? JSON.parse(check.rows[0].state_json) : check.rows[0].state_json;
+  }
+  dbReady = true;
 }
-let db = loadDb();
 if (!db.squads || typeof db.squads !== 'object') db.squads = {};
 if (!db.miningPool || typeof db.miningPool !== 'object') db.miningPool = { mined: 0, cap: WNULL_POOL_CAP };
 db.miningPool.cap = WNULL_POOL_CAP;
@@ -121,10 +125,15 @@ for (const task of TASKS) {
   }
 }
 function saveDb() {
+  if (!dbReady) return;
   const stateJson = JSON.stringify(db);
-  sql.prepare('INSERT INTO app_state (id,state_json,updated_at) VALUES (1,?,?) ON CONFLICT(id) DO UPDATE SET state_json=excluded.state_json, updated_at=excluded.updated_at').run(stateJson, Date.now());
-  // Human-readable backup for local development only; SQLite is the primary database.
-  try { fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2)); } catch {}
+  // Serialize writes so a slower earlier save cannot overwrite a newer game state.
+  saveQueue = saveQueue.then(() => pool.query(
+    'INSERT INTO nulltap_state (id,state_json,updated_at) VALUES (1,$1::jsonb,NOW()) ON CONFLICT (id) DO UPDATE SET state_json=EXCLUDED.state_json, updated_at=NOW()',
+    [stateJson]
+  )).catch(err => console.error('[DB] PostgreSQL save failed:', err.message));
+  // Local backup is best-effort only; PostgreSQL remains authoritative.
+  try { fs.mkdirSync(DATA_DIR, { recursive: true }); fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2)); } catch {}
 }
 function now() { return Date.now(); }
 function capacity(u) { return u.energyLevel * 1000; }
@@ -254,6 +263,15 @@ async function telegramMemberStatus(userId) {
   try { const r = await fetch(url); const d = await r.json(); return !!(d.ok && d.result && ['creator','administrator','member','restricted'].includes(d.result.status) && d.result.status !== 'restricted' ? d.result.is_member !== false : false); } catch { return false; }
 }
 async function handleApi(req, res, pathname) {
+  if (pathname === '/api/admin/stats' && req.method === 'GET') {
+    const u = getIdentity(req, {});
+    if (!u || !ADMIN_IDS.has(String(u.id))) return json(res, 403, { error: 'Admin access required. Open this page inside Telegram.' });
+    const users = Object.values(db.users || {});
+    const t = Date.now();
+    const countSince = ms => users.filter(x => Number(x.createdAt || 0) >= t - ms).length;
+    const onlineUsers = users.filter(x => Number(x.lastSeen || 0) <= t && Number(x.lastSeen || 0) >= t - 5 * 60 * 1000).length;
+    return json(res, 200, { totalUsers: users.length, onlineUsers, newUsers24h: countSince(24 * 60 * 60 * 1000), newUsers30d: countSince(30 * 24 * 60 * 60 * 1000), checkedAt: t, onlineWindowMinutes: 5 });
+  }
   // Public, read-only connectivity check. It never returns the API key.
   if (pathname === '/api/ton/status' && req.method === 'GET') {
     if (!TONCENTER_API_KEY) return json(res, 503, { ok:false, configured:false, network:'mainnet', message:'TON Center API key is not configured on the server.' });
@@ -460,23 +478,6 @@ async function handleApi(req, res, pathname) {
     grantLeagueRewards(u, u.coins); saveDb();
     return json(res, 200, { user:safeUser(u), swapped:amount, received:result, rate:WNULL_TO_NULL_RATE, message:'Internal game swap complete; not an on-chain DEX transaction.' });
   }
-  if (pathname === '/api/admin/stats' && req.method === 'GET') {
-    if (!ADMIN_IDS.has(u.id)) return json(res, 403, { error:'Admin access required.' });
-    const current = now();
-    const users = Object.values(db.users || {});
-    const onlineWindowMs = 5 * 60 * 1000;
-    const createdAt = x => Number(x.createdAt || 0);
-    const stats = {
-      totalUsers: users.length,
-      onlineUsers: users.filter(x => current - Number(x.lastSeen || 0) <= onlineWindowMs && current >= Number(x.lastSeen || 0)).length,
-      newUsers24h: users.filter(x => createdAt(x) > 0 && createdAt(x) >= current - 24 * 60 * 60 * 1000 && createdAt(x) <= current).length,
-      newUsers30d: users.filter(x => createdAt(x) > 0 && createdAt(x) >= current - 30 * 24 * 60 * 60 * 1000 && createdAt(x) <= current).length,
-      onlineWindowMinutes: 5,
-      checkedAt: new Date(current).toISOString()
-    };
-    saveDb();
-    return json(res, 200, stats);
-  }
   if (pathname === '/api/admin/tasks' && req.method === 'POST') {
     if (!ADMIN_IDS.has(u.id)) return json(res, 403, { error:'Admin access required.' });
     const t = body.task || {};
@@ -491,19 +492,19 @@ const MIME = { '.html':'text/html; charset=utf-8', '.css':'text/css; charset=utf
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
+  if (url.pathname === '/admin' || url.pathname === '/admin/') {
+    const adminFile = path.join(PUBLIC, 'admin.html');
+    if (!fs.existsSync(adminFile)) return json(res, 404, { error: 'Admin dashboard file missing' });
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+    return res.end(fs.readFileSync(adminFile));
+  }
+
   if (url.pathname === '/health') {
     return json(res, 200, { ok: true, service: 'NullTap', telegramTokenConfigured: Boolean(BOT_TOKEN) });
   }
 
   if (url.pathname === '/telegram-webhook') {
     return handleTelegramWebhook(req, res);
-  }
-
-  if (url.pathname === '/admin' || url.pathname === '/admin/') {
-    const adminPage = path.join(PUBLIC, 'admin.html');
-    if (!fs.existsSync(adminPage)) return json(res, 404, { error:'Admin dashboard file not installed.' });
-    res.writeHead(200, { 'Content-Type':'text/html; charset=utf-8', 'Cache-Control':'no-store', 'X-Content-Type-Options':'nosniff' });
-    return fs.createReadStream(adminPage).pipe(res);
   }
 
   if (url.pathname === '/tonconnect-manifest.json') { const host = req.headers.host || 'localhost:3000'; const proto = String(req.headers['x-forwarded-proto'] || url.protocol.replace(':','') || 'https').split(',')[0].trim(); const base = `${proto}://${host}`; return json(res, 200, { url:base, name:'NullTap', iconUrl:`${base}/icon-180.png` }); }
@@ -542,7 +543,7 @@ const server = http.createServer(async (req, res) => {
 
   
 if (req.method === 'GET' && req.url.split('?')[0] === '/nulltap-logo.jpg') {
-  const logoPath = [path.join(ROOT, 'nulltap-logo.jpg'), path.join(PUBLIC, 'nulltap-logo.jpg')].find(p => fs.existsSync(p)) || path.join(ROOT, 'nulltap-logo.jpg');
+  const logoPath = path.join(__dirname, 'nulltap-logo.jpg');
 
   if (!fs.existsSync(logoPath)) {
     res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
@@ -671,7 +672,7 @@ async function handleTelegramWebhook(req, res) {
     };
 
     let photoSent = false;
-    const logoPath = [path.join(ROOT, 'nulltap-logo.jpg'), path.join(PUBLIC, 'nulltap-logo.jpg')].find(p => fs.existsSync(p)) || path.join(ROOT, 'nulltap-logo.jpg');
+    const logoPath = path.join(ROOT, 'nulltap-logo.jpg');
 
     // Upload the image file directly to Telegram. This avoids Telegram failing
     // to download an image from a public URL or a missing static-file route.
@@ -734,7 +735,7 @@ async function sendStartWelcome(msg) {
     console.error('[Telegram] Cannot send welcome: token or chat ID missing.');
     return;
   }
-  const publicBase = String(process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || 'https://null-ty30.onrender.com').replace(/\/+$/, '');
+  const publicBase = String(process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || 'https://nulltap.onrender.com').replace(/\/+$/, '');
   const api = `https://api.telegram.org/bot${BOT_TOKEN}`;
   const chatId = msg.chat.id;
   const caption = '🟣 Welcome to NullTap!\n\n' +
@@ -742,32 +743,18 @@ async function sendStartWelcome(msg) {
     '🚀 Ready to start? Tap PLAY below and join the airdrop!';
   const appUrl = String(process.env.WEB_APP_URL || `${publicBase}/`).trim();
   const replyMarkup = { inline_keyboard: [[{ text: '▶️ PLAY', web_app: { url: appUrl } }]] };
-  const logoPath = [path.join(ROOT, 'nulltap-logo.jpg'), path.join(PUBLIC, 'nulltap-logo.jpg')].find(p => fs.existsSync(p)) || path.join(ROOT, 'nulltap-logo.jpg');
-  if (fs.existsSync(logoPath)) {
-    try {
-      const form = new FormData();
-      form.append('chat_id', String(chatId));
-      form.append('caption', caption);
-      form.append('reply_markup', JSON.stringify(replyMarkup));
-      form.append('photo', new Blob([fs.readFileSync(logoPath)], { type: 'image/jpeg' }), 'nulltap-logo.jpg');
-      const r = await fetch(`${api}/sendPhoto`, { method: 'POST', body: form });
-      const d = await r.json().catch(() => ({}));
-      if (r.ok && d.ok) {
-        console.log(`[Telegram] Welcome photo sent to chat ${chatId}`);
-        return;
-      }
-      console.error('[Telegram] sendPhoto failed:', d.description || `HTTP ${r.status}`);
-    } catch (e) { console.error('[Telegram] sendPhoto error:', e.message); }
-  } else {
-    console.error(`[Telegram] Logo file not found: ${logoPath}`);
-  }
+
+  // Send the text welcome first so a missing logo can never block /start.
   const r = await fetch(`${api}/sendMessage`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ chat_id: chatId, text: caption, reply_markup: replyMarkup })
   });
   const d = await r.json().catch(() => ({}));
-  if (!r.ok || !d.ok) console.error('[Telegram] sendMessage failed:', d.description || `HTTP ${r.status}`);
-  else console.log(`[Telegram] Welcome text sent to chat ${chatId}`);
+  if (!r.ok || !d.ok) {
+    console.error('[Telegram] sendMessage failed:', d.description || `HTTP ${r.status}`);
+    return;
+  }
+  console.log(`[Telegram] Welcome text sent to chat ${chatId}`);
 }
 
 async function startTelegramPolling() {
@@ -833,12 +820,25 @@ async function startTelegramPolling() {
   }
 }
 
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`NullTap running on port ${PORT}`);
-  console.log(`[Telegram] Token configured: ${Boolean(BOT_TOKEN)}`);
-  if (!BOT_TOKEN) {
-    console.error('TELEGRAM_BOT_TOKEN is missing; set it in Render Environment.');
-    return;
+initPostgres().then(() => {
+  // Normalize/migrate existing user fields after PostgreSQL state is loaded.
+  if (!db.squads || typeof db.squads !== 'object') db.squads = {};
+  if (!db.miningPool || typeof db.miningPool !== 'object') db.miningPool = { mined: 0, cap: WNULL_POOL_CAP };
+  db.miningPool.cap = WNULL_POOL_CAP;
+  db.miningPool.mined = Math.max(0, Math.min(WNULL_POOL_CAP, Number(db.miningPool.mined) || 0));
+  if (!Array.isArray(db.swaps)) db.swaps = [];
+  for (const u of Object.values(db.users || {})) {
+    if (u.squadId === undefined) u.squadId = null;
+    if (!Array.isArray(u.completedTasks)) u.completedTasks = [];
+    if (!Array.isArray(u.claimedLeagueRewards)) u.claimedLeagueRewards = [];
   }
-  startTelegramPolling().catch(e => console.error('[Telegram] Polling startup failed:', e.message));
+  saveDb();
+  server.listen(PORT, '0.0.0.0', () => {
+    console.log(`NullTap running on port ${PORT} with PostgreSQL persistence`);
+    console.log(`[Telegram] Token configured: ${Boolean(BOT_TOKEN)}`);
+    if (BOT_TOKEN) startTelegramPolling().catch(e => console.error('[Telegram] Polling startup failed:', e.message));
+  });
+}).catch(err => {
+  console.error('[DB] PostgreSQL initialization failed; server will not start to avoid data loss:', err.message);
+  process.exit(1);
 });
