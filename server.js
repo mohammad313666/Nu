@@ -542,7 +542,7 @@ const server = http.createServer(async (req, res) => {
 
   
 if (req.method === 'GET' && req.url.split('?')[0] === '/nulltap-logo.jpg') {
-  const logoPath = path.join(__dirname, 'nulltap-logo.jpg');
+  const logoPath = [path.join(ROOT, 'nulltap-logo.jpg'), path.join(PUBLIC, 'nulltap-logo.jpg')].find(p => fs.existsSync(p)) || path.join(ROOT, 'nulltap-logo.jpg');
 
   if (!fs.existsSync(logoPath)) {
     res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
@@ -671,7 +671,7 @@ async function handleTelegramWebhook(req, res) {
     };
 
     let photoSent = false;
-    const logoPath = path.join(PUBLIC, 'nulltap-logo.jpg');
+    const logoPath = [path.join(ROOT, 'nulltap-logo.jpg'), path.join(PUBLIC, 'nulltap-logo.jpg')].find(p => fs.existsSync(p)) || path.join(ROOT, 'nulltap-logo.jpg');
 
     // Upload the image file directly to Telegram. This avoids Telegram failing
     // to download an image from a public URL or a missing static-file route.
@@ -742,7 +742,7 @@ async function sendStartWelcome(msg) {
     '🚀 Ready to start? Tap PLAY below and join the airdrop!';
   const appUrl = String(process.env.WEB_APP_URL || `${publicBase}/`).trim();
   const replyMarkup = { inline_keyboard: [[{ text: '▶️ PLAY', web_app: { url: appUrl } }]] };
-  const logoPath = path.join(PUBLIC, 'nulltap-logo.jpg');
+  const logoPath = [path.join(ROOT, 'nulltap-logo.jpg'), path.join(PUBLIC, 'nulltap-logo.jpg')].find(p => fs.existsSync(p)) || path.join(ROOT, 'nulltap-logo.jpg');
   if (fs.existsSync(logoPath)) {
     try {
       const form = new FormData();
