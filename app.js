@@ -3,6 +3,8 @@
   if (tg) { tg.ready(); tg.expand(); try { tg.setHeaderColor('#000000'); tg.setBackgroundColor('#000000'); } catch {} }
   const initData = tg?.initData || '';
   const tgUser = tg?.initDataUnsafe?.user;
+  const adminLink = document.getElementById('admin-dashboard-link');
+  if (adminLink && String(tgUser?.username || '').replace(/^@/, '').toLowerCase() === 'mohammadn313666') adminLink.hidden = false;
   const startParam = tg?.initDataUnsafe?.start_param || '';
   const demoId = tgUser?.id ? String(tgUser.id) : (localStorage.getItem('null_demo_id') || '100001');
   if (!tgUser && !localStorage.getItem('null_demo_id')) localStorage.setItem('null_demo_id', demoId);
