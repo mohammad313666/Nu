@@ -10,6 +10,8 @@ const PORT = Number(process.env.PORT || 3000);
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 const DEV_MODE = process.env.DEV_MODE === 'true';
 const ADMIN_IDS = new Set((process.env.ADMIN_TELEGRAM_IDS || '').split(',').map(s => s.trim()).filter(Boolean));
+const ADMIN_USERNAMES = new Set((process.env.ADMIN_TELEGRAM_USERNAMES || 'MOHAMMADN313666').split(',').map(s => s.trim().replace(/^@/, '').toLowerCase()).filter(Boolean));
+function isAdminIdentity(user) { return !!user && (ADMIN_IDS.has(String(user.id)) || (!!user.username && ADMIN_USERNAMES.has(String(user.username).replace(/^@/, '').toLowerCase()))); }
 const TELEGRAM_CHANNEL = process.env.TELEGRAM_CHANNEL || '';
 const TELEGRAM_BOT_USERNAME = (process.env.TELEGRAM_BOT_USERNAME || '').replace(/^@/, '');
 // Keep the TON Center secret server-side; never expose it to public/app.js.
@@ -251,7 +253,7 @@ function isLocalBrowserRequest(req) {
 function getIdentity(req, body = {}) {
   const initData = req.headers['x-telegram-init-data'] || body.initData || '';
   const telegramUser = verifyTelegramInitData(initData);
-  if (telegramUser) return { id: String(telegramUser.id), name: [telegramUser.first_name, telegramUser.last_name].filter(Boolean).join(' ') || telegramUser.username || 'NULL Player', startParam: new URLSearchParams(initData).get('start_param') || '', isLocalDemo: false };
+  if (telegramUser) return { id: String(telegramUser.id), username: telegramUser.username || '', name: [telegramUser.first_name, telegramUser.last_name].filter(Boolean).join(' ') || telegramUser.username || 'NULL Player', startParam: new URLSearchParams(initData).get('start_param') || '', isLocalDemo: false };
   // Allow browser testing only from the same computer. Public/remote users still need valid Telegram auth.
   if (!DEV_MODE && !isLocalBrowserRequest(req)) return null;
   const demoId = String(body.demoId || req.headers['x-null-demo-id'] || parseCookies(req).null_demo || '100001');
@@ -265,7 +267,7 @@ async function telegramMemberStatus(userId) {
 async function handleApi(req, res, pathname) {
   if (pathname === '/api/admin/stats' && req.method === 'GET') {
     const u = getIdentity(req, {});
-    if (!u || !ADMIN_IDS.has(String(u.id))) return json(res, 403, { error: 'Admin access required. Open this page inside Telegram.' });
+    if (!isAdminIdentity(u)) return json(res, 403, { error: 'Admin access required. Open this page inside Telegram.' });
     const users = Object.values(db.users || {});
     const t = Date.now();
     const countSince = ms => users.filter(x => Number(x.createdAt || 0) >= t - ms).length;
@@ -479,7 +481,7 @@ async function handleApi(req, res, pathname) {
     return json(res, 200, { user:safeUser(u), swapped:amount, received:result, rate:WNULL_TO_NULL_RATE, message:'Internal game swap complete; not an on-chain DEX transaction.' });
   }
   if (pathname === '/api/admin/tasks' && req.method === 'POST') {
-    if (!ADMIN_IDS.has(u.id)) return json(res, 403, { error:'Admin access required.' });
+    if (!isAdminIdentity(u)) return json(res, 403, { error:'Admin access required.' });
     const t = body.task || {};
     if (!t.id || !t.title || !t.url) return json(res, 400, { error:'Task id, title and URL are required.' });
     const normalized = { id:String(t.id).replace(/[^a-z0-9_-]/gi,'').slice(0,40), title:String(t.title).slice(0,100), description:String(t.description||'').slice(0,250), platform:String(t.platform||'Other').slice(0,30), url:String(t.url).slice(0,500), reward:Math.max(0, Math.min(1000000, Math.floor(Number(t.reward)||0))), enabled:t.enabled !== false };
@@ -493,7 +495,7 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
   if (url.pathname === '/admin' || url.pathname === '/admin/') {
-    const adminFile = path.join(PUBLIC, 'admin.html');
+    const adminFile = fs.existsSync(path.join(PUBLIC, 'admin.html')) ? path.join(PUBLIC, 'admin.html') : path.join(ROOT, 'admin.html');
     if (!fs.existsSync(adminFile)) return json(res, 404, { error: 'Admin dashboard file missing' });
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
     return res.end(fs.readFileSync(adminFile));
@@ -595,16 +597,25 @@ if (req.method === 'GET' && req.url.split('?')[0] === '/nulltap-logo.jpg') {
 tryFile(0);
 });
 
-process.on('SIGINT', () => {
+let shuttingDown = false;
+async function gracefulShutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[${signal}] Saving final NullTap state before shutdown...`);
   try {
-    saveDb();
-    sql.close();
-  } finally {
-    process.exit(0);
-  }
-});
-
-process.on('SIGTERM', () => { try { saveDb(); sql.close(); } finally { process.exit(0); } });
+    if (dbReady) {
+      const stateJson = JSON.stringify(db);
+      saveQueue = saveQueue.then(() => pool.query(
+        'INSERT INTO nulltap_state (id,state_json,updated_at) VALUES (1,$1::jsonb,NOW()) ON CONFLICT (id) DO UPDATE SET state_json=EXCLUDED.state_json, updated_at=NOW()', [stateJson]
+      ));
+      await saveQueue;
+    }
+  } catch (e) { console.error('[DB] Final PostgreSQL save failed:', e.message); }
+  try { await pool.end(); } catch {}
+  process.exit(0);
+}
+process.on('SIGINT', () => { void gracefulShutdown('SIGINT'); });
+process.on('SIGTERM', () => { void gracefulShutdown('SIGTERM'); });
 
 // Telegram webhook: send the local NullTap logo + welcome caption + Mini App button.
 const TELEGRAM_WEBHOOK_PATH = '/telegram-webhook';
@@ -743,18 +754,49 @@ async function sendStartWelcome(msg) {
     '🚀 Ready to start? Tap PLAY below and join the airdrop!';
   const appUrl = String(process.env.WEB_APP_URL || `${publicBase}/`).trim();
   const replyMarkup = { inline_keyboard: [[{ text: '▶️ PLAY', web_app: { url: appUrl } }]] };
-
-  // Send the text welcome first so a missing logo can never block /start.
-  const r = await fetch(`${api}/sendMessage`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: chatId, text: caption, reply_markup: replyMarkup })
-  });
-  const d = await r.json().catch(() => ({}));
-  if (!r.ok || !d.ok) {
-    console.error('[Telegram] sendMessage failed:', d.description || `HTTP ${r.status}`);
+  let photoSent = false;
+  const logoPath = path.join(ROOT, 'nulltap-logo.jpg');
+  if (fs.existsSync(logoPath)) {
+    try {
+      const form = new FormData();
+      form.append('chat_id', String(chatId));
+      form.append('caption', caption);
+      form.append('reply_markup', JSON.stringify(replyMarkup));
+      form.append('photo', new Blob([fs.readFileSync(logoPath)], { type: 'image/jpeg' }), 'nulltap-logo.jpg');
+      const response = await fetch(`${api}/sendPhoto`, { method: 'POST', body: form, signal: AbortSignal.timeout(20000) });
+      const result = await response.json().catch(() => ({}));
+      photoSent = response.ok && result.ok === true;
+      if (!photoSent) console.error('[Telegram] /start photo upload failed:', result.description || `HTTP ${response.status}`);
+    } catch (e) { console.error('[Telegram] /start photo upload error:', e.message); }
+  } else {
+    console.error(`[Telegram] Logo file not found: ${logoPath}`);
+  }
+  if (!photoSent) {
+    try {
+      const response = await fetch(`${api}/sendPhoto`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, photo: `${publicBase}/nulltap-logo.jpg`, caption, reply_markup: replyMarkup }),
+        signal: AbortSignal.timeout(15000)
+      });
+      const result = await response.json().catch(() => ({}));
+      photoSent = response.ok && result.ok === true;
+      if (!photoSent) console.error('[Telegram] /start photo URL failed:', result.description || `HTTP ${response.status}`);
+    } catch (e) { console.error('[Telegram] /start photo URL error:', e.message); }
+  }
+  if (photoSent) {
+    console.log(`[Telegram] Welcome photo sent to chat ${chatId}`);
     return;
   }
-  console.log(`[Telegram] Welcome text sent to chat ${chatId}`);
+  try {
+    const response = await fetch(`${api}/sendMessage`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text: caption, reply_markup: replyMarkup }),
+      signal: AbortSignal.timeout(15000)
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result.ok) console.error('[Telegram] Welcome text fallback failed:', result.description || `HTTP ${response.status}`);
+    else console.log(`[Telegram] Welcome text fallback sent to chat ${chatId}`);
+  } catch (e) { console.error('[Telegram] Welcome message error:', e.message); }
 }
 
 async function startTelegramPolling() {
