@@ -21,3 +21,6 @@
   user-select: none;
   -webkit-tap-highlight-color: transparent;
 }
+
+/* League-specific trophies and leaderboard title */
+.league-board-heading{display:flex;align-items:center;gap:10px;margin:10px 0 4px;padding:12px 13px;border:1px solid #35233f;border-radius:13px;background:linear-gradient(110deg,#171020,#0d0a11)}.league-board-heading h3{font-size:14px;margin:0;color:#f1e5ff}.board-trophy{display:grid;place-items:center;width:35px;height:35px;flex-shrink:0}.board-trophy svg{width:34px;height:34px;filter:drop-shadow(0 0 7px color-mix(in srgb,var(--league-color) 45%,transparent))}.league-tab{display:inline-flex;align-items:center;gap:6px}.tab-trophy{font-size:20px;line-height:1;font-family:serif;transform:rotate(180deg);display:inline-block}.bronze-tab{--tab-color:#cd8b55}.silver-tab{--tab-color:#c7d0dc}.gold-tab{--tab-color:#f4c44e}.crystal-tab{--tab-color:#bd79ff}.legendary-tab{--tab-color:#79c5ff}.league-tab .tab-trophy{color:var(--tab-color);text-shadow:0 0 9px color-mix(in srgb,var(--tab-color) 50%,transparent)}.league-tab.active{border-color:var(--tab-color);color:var(--tab-color);background:color-mix(in srgb,var(--tab-color) 13%,#100c14)}

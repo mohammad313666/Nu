@@ -5,8 +5,8 @@
 *{box-sizing:border-box}body{margin:0;background:#090611;color:#f5f0ff;font-family:system-ui,-apple-system,sans-serif;padding:22px}
 main{max-width:900px;margin:auto}.brand{color:#c6a5ff;font-weight:800;letter-spacing:2px}.sub{color:#a99dbb;margin:6px 0 22px}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px}.card{background:#171124;border:1px solid #34234b;border-radius:18px;padding:20px}.label{color:#b8a9cc;font-size:14px}.value{font-size:32px;font-weight:800;margin-top:12px;color:#d7b8ff}
-button{border:0;border-radius:12px;padding:12px 18px;background:#9b5cff;color:#fff;font-weight:700;margin:18px 0;cursor:pointer}.status{color:#b8a9cc;font-size:13px} .error{color:#ff9898}
-</style></head><body><main><div class="brand">NULLTAP / ADMIN</div><h1>داشبورد مدیریت</h1><div class="sub">آمار کاربران • به‌روزرسانی خودکار هر ۶۰ ثانیه</div>
+button{border:0;border-radius:12px;padding:12px 18px;background:#9b5cff;color:#fff;font-weight:700;margin:18px 0;cursor:pointer}.status{color:#b8a9cc;font-size:13px} .error{color:#ff9898}.back-link{display:inline-flex;align-items:center;gap:8px;text-decoration:none;border:1px solid #5a3b79;border-radius:12px;padding:11px 15px;color:#e5d2ff;background:#171124;font-weight:800;margin:0 0 20px}.back-link:active{transform:scale(.98)}
+</style></head><body><main><a class="back-link" href="/" id="back-home">← بازگشت به بازی NullTap</a><div class="brand">NULLTAP / ADMIN</div><h1>داشبورد مدیریت</h1><div class="sub">آمار کاربران • به‌روزرسانی خودکار هر ۶۰ ثانیه</div>
 <div class="grid">
 <div class="card"><div class="label">کل کاربران</div><div class="value" id="total">—</div></div>
 <div class="card"><div class="label">آنلاین در ۵ دقیقه اخیر</div><div class="value" id="online">—</div></div>
@@ -15,6 +15,7 @@ button{border:0;border-radius:12px;padding:12px 18px;background:#9b5cff;color:#f
 </div><button id="refresh">به‌روزرسانی</button><div class="status" id="status">این صفحه را از داخل تلگرام و با حساب ادمین باز کن.</div></main>
 <script>
 const tg=window.Telegram?.WebApp; if(tg){tg.ready();tg.expand();}
+document.getElementById('back-home').addEventListener('click',e=>{if(history.length>1 && document.referrer && new URL(document.referrer).origin===location.origin){e.preventDefault();history.back();}});
 async function load(){const el=document.getElementById('status');el.className='status';el.textContent='در حال دریافت آمار…';
 try{if(!tg?.initData)throw new Error('این داشبورد باید داخل Telegram Mini App باز شود.');
 const r=await fetch('/api/admin/stats',{headers:{'X-Telegram-Init-Data':tg.initData,'Cache-Control':'no-cache'}});

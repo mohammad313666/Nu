@@ -135,6 +135,10 @@
     $('leaderboard').innerHTML=(board.top100||[]).map(p=>`<div class="leader-row"><span class="rank">#${p.rank}</span><span class="leader-name">${escapeHtml(p.name)}</span><span class="leader-coins">${fmt(p.coins)} NULL</span></div>`).join('') || '<div class="leader-row">No players in this league yet</div>';
     $('my-league-rank').textContent=board.userRank ? `Your rank in ${selectedLeague}: #${board.userRank} · ${board.total} players` : `Your rank in ${selectedLeague}: Not in this league`;
     document.querySelectorAll('.league-tab').forEach(tab=>tab.classList.toggle('active',tab.dataset.league===selectedLeague));
+    const activeLeague=LEAGUES.find(l=>l.id===selectedLeague)||LEAGUES[0];
+    const boardTitle=$('league-board-title'), boardTrophy=$('board-trophy');
+    if(boardTitle) boardTitle.textContent=`${activeLeague.name} League Leaderboard`;
+    if(boardTrophy){boardTrophy.style.color=activeLeague.color;boardTrophy.style.setProperty('--league-color',activeLeague.color);boardTrophy.innerHTML='<svg viewBox="0 0 64 64" aria-hidden="true"><path d="M18 8h28v11c0 13-6 21-14 21S18 32 18 19V8Zm-8 4h8v8c0 8 4 13 9 15-11 0-17-7-17-18v-5Zm44 0h-8v8c0 8-4 13-9 15 11 0 17-7 17-18v-5ZM28 40h8v8h10v8H18v-8h10v-8Z" fill="currentColor"/></svg>';}
     $('connection').textContent=initData?'TELEGRAM CONNECTED':'BROWSER DEMO';
   }
   function escapeHtml(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
